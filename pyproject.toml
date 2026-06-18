@@ -1,0 +1,18 @@
+[project]
+name = "quicksimbio-ui"
+version = "0.1.0"
+description = "A simple UI wrapper around the QuickSimsBio codebase, allowing researchers to run mechanistic model simulations very quickly and very easily."
+authors = [
+    {name = "Theo-BRN",email = "theobrn@live.co.uk"}
+]
+requires-python = ">=3.12"
+dependencies = [
+    "streamlit (>=1.58.0,<2.0.0)",
+    "copasi-basico (>=0.86,<0.87)",
+    "plotly (>=6.8.0,<7.0.0)"
+]
+
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"

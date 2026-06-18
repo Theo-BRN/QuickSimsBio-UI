@@ -1,0 +1,12 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Poetry / Environments
+.venv/
+poetry.lock
+
+# Streamlit
+.streamlit/
