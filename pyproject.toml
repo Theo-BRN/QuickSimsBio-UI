@@ -9,10 +9,14 @@ requires-python = ">=3.12"
 dependencies = [
     "streamlit (>=1.58.0,<2.0.0)",
     "copasi-basico (>=0.86,<0.87)",
-    "plotly (>=6.8.0,<7.0.0)"
+    "plotly (>=6.8.0,<7.0.0)",
+    "quicksimsbio @ file:///Users/theowork/Library/CloudStorage/OneDrive-SharedLibraries-UniversityofCambridge/User_PHARM_Cell_Signalling_Lab%20-%20Computational%20Coding%20Channel/Theo/Projects/QuickSimsBio"
 ]
 
 
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]
 build-backend = "poetry.core.masonry.api"
+
+[tool.poetry.dependencies]
+quicksimsbio = {develop = true}
