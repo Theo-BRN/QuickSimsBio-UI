@@ -16,6 +16,7 @@ can remember across sessions, while ``example`` (and, later, uploaded-file)
 entries are file-backed and session-only.
 """
 
+import tempfile
 from pathlib import Path
 
 import basico as bsc
@@ -47,6 +48,46 @@ def get_model_registry() -> dict[str, dict]:
     return {**examples, **biomodels}
 
 
+def merge_user_models(base: dict, user: dict) -> dict:
+    """Combine the built-in registry with models the user added this session.
+
+    User-added models win on any name collision (they're the more specific,
+    intentional choice).
+    """
+    return {**base, **user}
+
+
+def make_uploaded_source(filename: str, data: bytes) -> dict:
+    """Write uploaded model bytes to a temp file and return a tagged source.
+
+    Returns an ``"uploaded"`` source pointing at the temp file. The file lives
+    for the server process's lifetime (session-scoped in practice) — uploaded
+    models are intentionally not remembered across sessions (see the persistence
+    decision in TODO/memory). The original suffix is preserved so basico can
+    detect the format (.cps vs .sbml).
+    """
+    suffix = Path(filename).suffix or ".cps"
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        tmp.write(data)
+        path = tmp.name
+    return {"kind": "uploaded", "ref": path}
+
+
+def _load_file(path: str):
+    """Load a model file, letting basico detect COPASI vs SBML format.
+
+    ``.sbml`` goes straight to ``import_sbml``; everything else tries
+    ``load_model`` first and falls back to ``import_sbml`` for an ``.xml`` file
+    that turns out to be SBML.
+    """
+    if Path(path).suffix.lower() == ".sbml":
+        return bsc.import_sbml(path)
+    try:
+        return bsc.load_model(path)
+    except Exception:
+        return bsc.import_sbml(path)
+
+
 def load_model(source: dict):
     """Load the model described by a tagged ``source`` dict and return it.
 
@@ -54,8 +95,8 @@ def load_model(source: dict):
     becomes basico's current model. Raises ``ValueError`` for an unknown kind.
     """
     kind = source["kind"]
-    if kind == "example":
-        return bsc.load_model(source["ref"])
+    if kind in ("example", "uploaded"):
+        return _load_file(source["ref"])
     if kind == "biomodels":
         return bsc.load_biomodel(source["ref"])
     raise ValueError(f"Unknown model source kind: {kind!r}")
