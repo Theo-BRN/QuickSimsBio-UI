@@ -1,10 +1,23 @@
-"""UI smoke test for the Streamlit entry point (app/main.py).
+"""UI smoke tests for the Streamlit entry point (app/main.py).
 
-Uses Streamlit's AppTest to run the app headlessly and check the model picker
-renders with nothing selected (so no model is loaded on first paint).
+Uses Streamlit's AppTest to run the app headlessly. Note: ``st.data_editor``
+renders as a read-only ``Dataframe`` element in AppTest — its cells can't be
+edited programmatically — so the grid/error logic is covered by the pure-adapter
+unit tests in ``test_simulations.py``. Here we check the table *renders* with the
+right defaults and that a default (all-Single) run produces a results table.
 """
 
 from streamlit.testing.v1 import AppTest
+
+
+def _input_editor(at):
+    """The inputs-table data_editor (its key starts with 'input_editor')."""
+    return next(d for d in at.dataframe if d.key and d.key.startswith("input_editor"))
+
+
+def _result_tables(at):
+    """The st.dataframe result tables (everything that isn't the input editor)."""
+    return [d for d in at.dataframe if not (d.key and d.key.startswith("input_editor"))]
 
 
 def test_app_renders_model_picker_with_nothing_selected():
@@ -27,10 +40,21 @@ def test_app_auto_selects_model_from_session_state():
     assert at.selectbox[0].value == "brusselator"
 
 
-def test_app_runs_a_simulation_and_shows_a_results_table():
-    # End-to-end slice: a loaded model + Run button → a results table appears.
-    # This actually runs COPASI via quicksimsbio, so we shrink the run (few
-    # points) and give the click a generous timeout.
+def test_app_renders_inputs_table_with_every_input_as_single():
+    at = AppTest.from_file("app/main.py")
+    at.session_state["selected_model"] = "brusselator"
+    at.run()
+    assert not at.exception
+
+    table = _input_editor(at).value
+    assert "X" in list(table["Param"])  # brusselator exposes its species as inputs
+    assert set(table["Type"]) == {"Single"}  # every input starts held at its default
+
+
+def test_app_runs_a_default_simulation_and_shows_a_results_table():
+    # End-to-end slice: a loaded model + Run (all inputs Single at default) → a
+    # results table. This actually runs COPASI via quicksimsbio, so we shrink the
+    # run (few points) and give the click a generous timeout.
     at = AppTest.from_file("app/main.py")
     at.session_state["selected_model"] = "brusselator"
     at.run()
@@ -38,43 +62,9 @@ def test_app_runs_a_simulation_and_shows_a_results_table():
 
     at.number_input[1].set_value(20).run()  # number_input[1] = "Number of points"
 
-    run_btn = next(b for b in at.button if b.label == "Run simulation")
-    run_btn.click().run(timeout=60)
-
-    assert not at.exception
-    assert len(at.dataframe) == 1  # the results table rendered
-
-
-def test_app_scans_an_input_and_runs_one_simulation_per_grid_value():
-    # Switch one input (brusselator's species "X") to Scan with three values:
-    # the run should produce three simulations (three Sim_Num blocks).
-    at = AppTest.from_file("app/main.py")
-    at.session_state["selected_model"] = "brusselator"
-    at.run()
-    assert not at.exception
-
-    at.number_input[1].set_value(20).run()  # shrink the run for speed
-
-    next(s for s in at.selectbox if s.key == "mode_X").set_value("Scan").run()
-    next(t for t in at.text_input if t.key == "vals_X").set_value("0.1, 1, 10").run()
-
     next(b for b in at.button if b.label == "Run simulation").click().run(timeout=60)
 
     assert not at.exception
-    result = at.dataframe[0].value
-    assert result["Sim_Num"].nunique() == 3
-
-
-def test_app_blocks_run_on_a_bad_scan_value():
-    # A non-numeric scan entry shows an inline error and disables Run.
-    at = AppTest.from_file("app/main.py")
-    at.session_state["selected_model"] = "brusselator"
-    at.run()
-
-    next(s for s in at.selectbox if s.key == "mode_X").set_value("Scan").run()
-    next(t for t in at.text_input if t.key == "vals_X").set_value("oops").run()
-
-    assert not at.exception
-    assert any("isn't a number" in e.value for e in at.error)
-    run_btn = next(b for b in at.button if b.label == "Run simulation")
-    assert run_btn.disabled
+    results = _result_tables(at)
+    assert len(results) == 1
+    assert results[0].value["Sim_Num"].nunique() == 1  # one default run

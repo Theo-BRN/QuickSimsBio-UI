@@ -9,96 +9,52 @@ Like ``models.py``, this module deliberately does **not** import Streamlit:
 keeping it Streamlit-free means every function here is unit-testable without a
 running app (the tests monkeypatch ``qsb`` the same way ``test_models`` patches
 ``basico``).
+
+The UI builds inputs as an editable **table** (one row per model input). This
+module owns the two pure translations around it: ``default_input_table`` (model
+defaults → starting table) and ``build_scan_dict_from_table`` (edited table →
+``scan_dict``). Keeping them here, free of Streamlit, is what makes the core
+logic testable.
 """
 
 import basico as bsc
 import numpy as np
+import pandas as pd
 
 import quicksimsbio as qsb
 
 
-def get_inputs(model) -> dict[str, object]:
-    """Return the ``scan_dict`` skeleton for ``model``: ``{input_name: None}``.
+# --- Inputs-table schema ------------------------------------------------------
+# Column names and the cell values for the Type / Scale dropdowns. Defined once
+# and shared by ``default_input_table`` and ``build_scan_dict_from_table`` so the
+# table the UI shows and the table the adapter reads can never drift apart.
+COL_PARAM = "Param"
+COL_VALUE = "Value"
+COL_LOWER = "Lower"
+COL_UPPER = "Upper"
+COL_TYPE = "Type"
+COL_SCALE = "Scale"
+COL_N = "n"
+INPUT_COLUMNS = [COL_PARAM, COL_VALUE, COL_LOWER, COL_UPPER, COL_TYPE, COL_SCALE, COL_N]
 
-    The package extracts the model's fixed global quantities and initial species
-    and lists them as inputs, each holding at its default (``None``). The UI then
-    overrides the ones the user wants to scan (see ``build_scan_dict``).
+TYPE_SINGLE = "Single"
+TYPE_GRID = "Grid"
+TYPE_RANDOM = "Random (WIP)"  # visible but not wired until M4
+INPUT_TYPES = [TYPE_SINGLE, TYPE_GRID, TYPE_RANDOM]
 
-    We pass ``model`` explicitly rather than relying on basico's "current model"
-    so a run is never tied to whatever model happens to be loaded globally.
-    """
-    return qsb.get_model_inputs(model=model)
-
-
-def parse_grid_values(text: str) -> list[float] | None:
-    """Parse a comma-separated string of numbers into a grid list of floats.
-
-    This is the per-input adapter for the **grid** mode: the user types values
-    like ``"0.1, 1, 10"`` and we turn them into ``[0.1, 1.0, 10.0]`` for the
-    ``scan_dict``. Blank / whitespace-only input (and a string of only commas)
-    means "hold at default", so we return ``None``. Stray empty tokens from a
-    trailing or double comma are tolerated.
-
-    Raises ``ValueError`` with a user-facing message if a token isn't a number,
-    so the UI can show it via ``st.error`` (same friendly-message pattern as the
-    model-loading code in ``main.py``).
-    """
-    if not text or not text.strip():
-        return None
-
-    values: list[float] = []
-    for token in text.split(","):
-        token = token.strip()
-        if not token:
-            continue  # tolerate "1, 2," or "1,,2"
-        try:
-            values.append(float(token))
-        except ValueError:
-            raise ValueError(
-                f"'{token}' isn't a number — enter comma-separated values, "
-                f"e.g. 0.1, 1, 10."
-            )
-
-    return values or None
+SCALE_LINEAR = "Linear"
+SCALE_LOG = "Log"
+INPUT_SCALES = [SCALE_LINEAR, SCALE_LOG]
 
 
-def build_scan_dict(skeleton: dict, overrides: dict) -> dict:
-    """Combine the all-``None`` input skeleton with the user's overrides.
-
-    ``skeleton`` is ``get_inputs(model)`` output (every input → ``None``).
-    ``overrides`` maps the inputs the user chose to scan to their value
-    (currently a grid ``list``; a range ``dict`` will slot in unchanged once that
-    UI lands). Inputs not overridden — or overridden with ``None`` (e.g. the user
-    picked "scan" but left the box blank) — stay held at default.
-
-    An override key that isn't a real model input raises ``ValueError`` — this
-    catches typos and stale UI state rather than silently scanning nothing.
-    """
-    unknown = set(overrides) - set(skeleton)
-    if unknown:
-        raise ValueError(f"Unknown input(s): {', '.join(sorted(unknown))}")
-
-    scan = {name: None for name in skeleton}
-    scan.update({name: value for name, value in overrides.items() if value is not None})
-    return scan
-
-
-def make_timepoints(end: float, n_points: int) -> list[float]:
-    """Evenly spaced timepoints from 0 to ``end`` inclusive, ``n_points`` of them.
-
-    Mirrors the package's own default (``np.linspace(0, 1000, 300)``). Returns a
-    plain Python list (``.tolist()``) so it stays hashable-by-value for Streamlit
-    caching and easy to assert on in tests.
-    """
-    return np.linspace(0, end, n_points).tolist()
-
-
+# --- Model-state helpers ------------------------------------------------------
 def _snapshot_initial_state(model) -> tuple[dict, dict]:
     """Capture a model's initial species concentrations and parameter values.
 
-    Returned as two ``{name: value}`` dicts so a run can put them back afterwards
-    (see ``run``). ``get_parameters`` returns ``None`` for a model with no global
-    quantities (e.g. brusselator), which we treat as "nothing to snapshot".
+    Returned as two ``{name: value}`` dicts. Used both to read input defaults
+    (see ``get_inputs``) and to restore the model after a run (see ``run``).
+    ``get_parameters`` returns ``None`` for a model with no global quantities
+    (e.g. brusselator), which we treat as "nothing to snapshot".
     """
     species = bsc.get_species(model=model)
     params = bsc.get_parameters(model=model)
@@ -116,12 +72,130 @@ def _restore_initial_state(model, snapshot: tuple[dict, dict]) -> None:
         bsc.set_parameters(name=name, initial_value=value, model=model)
 
 
+# --- Inputs: defaults → table → scan_dict -------------------------------------
+def get_inputs(model) -> dict[str, float]:
+    """Return each model input mapped to its current default value.
+
+    The package lists the model's fixed global quantities and initial species as
+    inputs; we look up each one's default from basico (the same initial-value
+    fields the snapshot/restore guard reads). The UI seeds its inputs table with
+    these defaults, so every input starts as a "Single" value at its default.
+
+    ``model`` is passed explicitly rather than relying on basico's "current
+    model" so the inputs are never tied to whatever happens to be loaded globally.
+    """
+    names = qsb.get_model_inputs(model=model)
+    species_state, param_state = _snapshot_initial_state(model)
+    defaults = {**species_state, **param_state}
+    return {name: float(defaults.get(name, np.nan)) for name in names}
+
+
+def default_input_table(defaults: dict[str, float]) -> pd.DataFrame:
+    """Build the starting inputs table from ``{name: default_value}``.
+
+    Every input starts as ``Single`` (held at its default Value); Lower/Upper/n
+    are blank (``NaN``) and only matter once a row is switched to ``Grid``. Numeric
+    columns are float so ``st.data_editor``'s ``NumberColumn`` shows blanks for the
+    unused cells rather than choking on mixed/object dtypes.
+    """
+    rows = [
+        {
+            COL_PARAM: name,
+            COL_VALUE: value,
+            COL_LOWER: np.nan,
+            COL_UPPER: np.nan,
+            COL_TYPE: TYPE_SINGLE,
+            COL_SCALE: SCALE_LINEAR,
+            COL_N: np.nan,
+        }
+        for name, value in defaults.items()
+    ]
+    return pd.DataFrame(rows, columns=INPUT_COLUMNS)
+
+
+def _grid_values(lower, upper, n, log: bool) -> list[float]:
+    """Build the list of grid points for a ``Grid`` row.
+
+    Linear → ``np.linspace``; Log → ``np.geomspace`` (real, log-spaced points, to
+    match how the package interprets log bounds — actual values, not exponents).
+    Raises ``ValueError`` with a user-facing message on the cases the UI must
+    guard against, so they surface as inline errors next to the table.
+    """
+    if any(pd.isna(x) for x in (lower, upper, n)):
+        raise ValueError("Grid needs Lower, Upper and n.")
+    n = int(n)
+    if n < 2:
+        raise ValueError("n must be at least 2 for a grid.")
+    if lower >= upper:
+        raise ValueError("Lower must be less than Upper.")
+    if log:
+        if lower <= 0:
+            raise ValueError("Log scans need Lower greater than 0.")
+        return np.geomspace(lower, upper, n).tolist()
+    return np.linspace(lower, upper, n).tolist()
+
+
+def build_scan_dict_from_table(table: pd.DataFrame) -> tuple[dict, dict]:
+    """Translate the edited inputs table into a ``scan_dict`` (+ per-row errors).
+
+    Each row becomes one ``scan_dict`` entry, with meaning decided by its Type
+    (``st.data_editor`` can't disable cells per-row, so unused cells are simply
+    ignored here):
+
+    - ``Single`` → ``[value]`` (a one-point "grid" — holds/sets that input).
+    - ``Grid``   → a list from ``_grid_values`` (Linear or Log).
+    - ``Random (WIP)`` → not built yet; recorded as an error (lands in M4).
+
+    Returns ``(scan_dict, errors)`` where ``errors`` maps an input name to a
+    friendly message. The UI shows those and disables Run while any exist, so a
+    bad row never reaches the simulator.
+    """
+    scan_dict: dict[str, list[float]] = {}
+    errors: dict[str, str] = {}
+
+    for row in table.to_dict("records"):
+        name = row[COL_PARAM]
+        input_type = row[COL_TYPE]
+        try:
+            if input_type == TYPE_SINGLE:
+                value = row[COL_VALUE]
+                if pd.isna(value):
+                    raise ValueError("Single needs a Value.")
+                scan_dict[name] = [float(value)]
+            elif input_type == TYPE_GRID:
+                scan_dict[name] = _grid_values(
+                    row[COL_LOWER], row[COL_UPPER], row[COL_N],
+                    log=row[COL_SCALE] == SCALE_LOG,
+                )
+            elif input_type == TYPE_RANDOM:
+                raise ValueError(
+                    "Random scans are coming in M4 — use Single or Grid for now."
+                )
+            else:
+                raise ValueError(f"Unknown type {input_type!r}.")
+        except ValueError as exc:
+            errors[name] = str(exc)
+
+    return scan_dict, errors
+
+
+# --- Running ------------------------------------------------------------------
+def make_timepoints(end: float, n_points: int) -> list[float]:
+    """Evenly spaced timepoints from 0 to ``end`` inclusive, ``n_points`` of them.
+
+    Mirrors the package's own default (``np.linspace(0, 1000, 300)``). Returns a
+    plain Python list (``.tolist()``) so it stays hashable-by-value for Streamlit
+    caching and easy to assert on in tests.
+    """
+    return np.linspace(0, end, n_points).tolist()
+
+
 def run(model, scan_dict: dict, timepoints: list[float] | None = None):
     """Run time-course simulations for ``scan_dict`` and return a wide DataFrame.
 
-    Thin wrapper over ``qsb.run_simulations``. An all-``None`` ``scan_dict`` runs
-    a single simulation at the model's defaults; lists scan a grid. ``model`` is
-    passed explicitly (not via basico's global current-model state).
+    Thin wrapper over ``qsb.run_simulations``. Single values run one point each;
+    grid lists scan a grid. ``model`` is passed explicitly (not via basico's
+    global current-model state).
 
     The returned DataFrame is wide: a ``Time`` column, one column per output
     species, the varied-input columns, and a ``Sim_Num`` column identifying each

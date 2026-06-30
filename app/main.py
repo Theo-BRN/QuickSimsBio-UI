@@ -8,6 +8,7 @@ Streamlit re-runs this whole script top-to-bottom on every interaction, so the
 expensive work (listing examples, loading a model) is wrapped in caches below.
 """
 
+from math import prod
 from pathlib import Path
 
 import streamlit as st
@@ -43,11 +44,12 @@ def load_model(kind: str, ref: str):
 
 @st.cache_data(show_spinner=False)
 def get_inputs_cached(kind: str, ref: str) -> dict:
-    """The model's input skeleton (``{input_name: None}``), cached per model.
+    """The model's inputs mapped to their defaults (``{name: value}``), per model.
 
     Same pattern as ``run_cached``: keyed on the hashable ``(kind, ref)`` and the
     live model handle re-fetched from the cache_resource loader inside. The
-    result is a plain dict, so cache_data stores it happily.
+    result is a plain dict, so cache_data stores it happily. Used to seed the
+    inputs table (every input starts as a "Single" at its default value).
     """
     model = load_model(kind, ref)
     return simulations.get_inputs(model)
@@ -152,40 +154,46 @@ except Exception as exc:  # broad on purpose: show a friendly message, not a tra
 st.success(f"Loaded **{choice}**.")
 
 # --- Run a simulation ---------------------------------------------------------
-# Inputs default to "Hold" (model default). Switch one to "Scan" and give a list
-# of values to sweep it. The result is shown as a raw table — adaptive plots come
-# later (M4). main.py only wires widgets to the pure adapter functions in
-# simulations.py; the parsing/validation lives there so it stays testable.
+# Inputs are an editable table: every input starts as "Single" at its model
+# default, and the Type column decides what each row means. The result is shown
+# as a raw table — adaptive plots come later (M4). main.py only renders widgets
+# and wires them to the pure adapter functions in simulations.py; all the
+# parsing/validation lives there so it stays testable.
 st.subheader("Run a simulation")
 
-inputs = get_inputs_cached(source["kind"], source["ref"])
+# A fresh editor per model (key includes kind/ref) so switching models doesn't
+# carry edits across; the cached default table is the stable baseline and the
+# editor's `key` persists the user's edits, so we read the *return* value.
+default_table = simulations.default_input_table(get_inputs_cached(source["kind"], source["ref"]))
+edited = st.data_editor(
+    default_table,
+    key=f"input_editor::{source['kind']}::{source['ref']}",
+    hide_index=True,
+    use_container_width=True,
+    column_config={
+        simulations.COL_PARAM: st.column_config.TextColumn("Input", disabled=True),
+        simulations.COL_VALUE: st.column_config.NumberColumn("Value", help="Used when Type is Single."),
+        simulations.COL_LOWER: st.column_config.NumberColumn("Lower", help="Grid lower bound."),
+        simulations.COL_UPPER: st.column_config.NumberColumn("Upper", help="Grid upper bound."),
+        simulations.COL_TYPE: st.column_config.SelectboxColumn(
+            "Type", options=simulations.INPUT_TYPES, required=True,
+            help="Single = fixed value · Grid = sweep Lower→Upper · Random arrives in M4.",
+        ),
+        simulations.COL_SCALE: st.column_config.SelectboxColumn(
+            "Scale", options=simulations.INPUT_SCALES, required=True,
+            help="Linear or logarithmic spacing for a Grid scan.",
+        ),
+        simulations.COL_N: st.column_config.NumberColumn("n", step=1, help="Number of grid points."),
+    },
+)
+scan_dict, input_errors = simulations.build_scan_dict_from_table(edited)
 
-# Collect the inputs the user chose to scan. parse_grid_values turns the typed
-# text into a list (or None = hold); a bad entry raises, which we surface inline.
-overrides: dict[str, list[float] | None] = {}
-input_errors: dict[str, str] = {}
-with st.expander(f"Inputs ({len(inputs)})", expanded=False):
-    st.caption(
-        "Anything left on **Hold** stays at the model's default. Switch an input "
-        "to **Scan** and enter values to sweep it (e.g. `0.1, 1, 10`)."
-    )
-    for name in inputs:
-        col_mode, col_vals = st.columns([1, 2])
-        mode = col_mode.selectbox(name, ["Hold", "Scan"], key=f"mode_{name}")
-        if mode == "Scan":
-            text = col_vals.text_input(
-                name,
-                key=f"vals_{name}",
-                placeholder="e.g. 0.1, 1, 10",
-                label_visibility="collapsed",
-            )
-            try:
-                overrides[name] = simulations.parse_grid_values(text)
-            except ValueError as exc:
-                input_errors[name] = str(exc)
-
-for name, message in input_errors.items():
-    st.error(f"**{name}**: {message}")
+if input_errors:
+    for name, message in input_errors.items():
+        st.error(f"**{name}**: {message}")
+else:
+    n_sims = prod(len(values) for values in scan_dict.values())
+    st.caption(f"This will run {n_sims} simulation{'s' if n_sims != 1 else ''}.")
 
 col_time, col_points = st.columns(2)
 end_time = col_time.number_input(
@@ -204,7 +212,6 @@ n_points = col_points.number_input(
 )
 
 if st.button("Run simulation", type="primary", disabled=bool(input_errors)):
-    scan_dict = simulations.build_scan_dict(inputs, overrides)
     timepoints = simulations.make_timepoints(end_time, int(n_points))
     result = run_cached(source["kind"], source["ref"], scan_dict, timepoints)
     st.dataframe(result, use_container_width=True)

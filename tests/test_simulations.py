@@ -1,12 +1,13 @@
 """Tests for the simulation adapter (app/simulations.py).
 
-Pure-logic tests: the ``quicksimsbio`` package is monkeypatched so they don't
-load COPASI or run a real simulation. They check that each wrapper forwards its
-arguments correctly and returns what the package returns — i.e. that the adapter
-is a faithful, thin seam over the package (mirrors how ``test_models`` patches
-``basico``). ``make_timepoints`` is pure maths, so it's tested for real.
+Pure-logic tests: ``quicksimsbio`` and basico are monkeypatched so they don't
+load COPASI or run a real simulation. They check the two table translations
+(``default_input_table`` and ``build_scan_dict_from_table``), the grid maths, and
+that ``run`` forwards its args and restores model state. One real-model test at
+the end is the regression guard for the shared-model state leak.
 """
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -27,8 +28,8 @@ def _params_df(values: dict | None):
 def stub_model_state(monkeypatch):
     """Stub basico's get/set initial-state calls and record every restore write.
 
-    Lets the hermetic ``run`` tests exercise the snapshot/restore guard without a
-    real COPASI model. Returns the list that restore writes are appended to.
+    Lets the hermetic ``get_inputs`` / ``run`` tests work without a real COPASI
+    model. Returns the list that restore writes are appended to.
     """
     monkeypatch.setattr(simulations.bsc, "get_species", lambda model=None: _species_df({"X": 3.0}))
     monkeypatch.setattr(simulations.bsc, "get_parameters", lambda model=None: _params_df({"k": 2.0}))
@@ -38,76 +39,133 @@ def stub_model_state(monkeypatch):
     return restored
 
 
-def test_get_inputs_forwards_model_and_returns_skeleton(monkeypatch):
-    seen = {}
+def _row(param, value=np.nan, lower=np.nan, upper=np.nan,
+         type_=simulations.TYPE_SINGLE, scale=simulations.SCALE_LINEAR, n=np.nan):
+    """Build one inputs-table row dict with every column set."""
+    return {
+        simulations.COL_PARAM: param,
+        simulations.COL_VALUE: value,
+        simulations.COL_LOWER: lower,
+        simulations.COL_UPPER: upper,
+        simulations.COL_TYPE: type_,
+        simulations.COL_SCALE: scale,
+        simulations.COL_N: n,
+    }
 
-    def fake_get_model_inputs(model=None):
-        seen["model"] = model
-        return {"drug": None, "k_off": None}
 
-    monkeypatch.setattr(simulations.qsb, "get_model_inputs", fake_get_model_inputs)
-    result = simulations.get_inputs("MODEL")
-
-    assert result == {"drug": None, "k_off": None}
-    assert seen["model"] == "MODEL"  # passed through explicitly, not via global
+def _table(*rows) -> pd.DataFrame:
+    return pd.DataFrame(list(rows), columns=simulations.INPUT_COLUMNS)
 
 
+# --- get_inputs ---------------------------------------------------------------
+def test_get_inputs_maps_each_input_to_its_default(monkeypatch, stub_model_state):
+    monkeypatch.setattr(
+        simulations.qsb, "get_model_inputs", lambda model=None: {"X": None, "k": None}
+    )
+    # stub_model_state supplies species {"X": 3.0} and parameters {"k": 2.0}.
+    assert simulations.get_inputs("MODEL") == {"X": 3.0, "k": 2.0}
+
+
+# --- default_input_table ------------------------------------------------------
+def test_default_input_table_starts_every_input_as_single_at_default():
+    table = simulations.default_input_table({"X": 3.0, "k": 2.0})
+
+    assert list(table.columns) == simulations.INPUT_COLUMNS
+    assert list(table[simulations.COL_PARAM]) == ["X", "k"]
+    assert list(table[simulations.COL_VALUE]) == [3.0, 2.0]
+    assert set(table[simulations.COL_TYPE]) == {simulations.TYPE_SINGLE}
+    assert set(table[simulations.COL_SCALE]) == {simulations.SCALE_LINEAR}
+    assert table[simulations.COL_LOWER].isna().all()  # blank until switched to Grid
+    assert table[simulations.COL_N].isna().all()
+
+
+# --- _grid_values -------------------------------------------------------------
+def test_grid_values_linear_is_evenly_spaced():
+    assert simulations._grid_values(0, 10, 5, log=False) == [0.0, 2.5, 5.0, 7.5, 10.0]
+
+
+def test_grid_values_log_is_geometric_in_real_values():
+    vals = simulations._grid_values(0.01, 100, 5, log=True)
+    assert vals == pytest.approx([0.01, 0.1, 1.0, 10.0, 100.0])
+
+
+def test_grid_values_rejects_bad_inputs_with_friendly_messages():
+    with pytest.raises(ValueError, match="at least 2"):
+        simulations._grid_values(0, 10, 1, log=False)
+    with pytest.raises(ValueError, match="less than Upper"):
+        simulations._grid_values(10, 1, 5, log=False)
+    with pytest.raises(ValueError, match="Lower greater than 0"):
+        simulations._grid_values(0, 10, 5, log=True)
+    with pytest.raises(ValueError, match="Lower, Upper and n"):
+        simulations._grid_values(np.nan, 10, 5, log=False)
+
+
+# --- build_scan_dict_from_table -----------------------------------------------
+def test_build_scan_dict_single_becomes_a_one_point_list():
+    scan, errors = simulations.build_scan_dict_from_table(_table(_row("A", value=1.0)))
+
+    assert scan == {"A": [1.0]}
+    assert errors == {}
+
+
+def test_build_scan_dict_all_single_each_have_length_one():
+    table = _table(_row("A", value=1.0), _row("B", value=2.0))
+    scan, errors = simulations.build_scan_dict_from_table(table)
+
+    assert scan == {"A": [1.0], "B": [2.0]}
+    assert all(len(v) == 1 for v in scan.values())  # ⇒ one combined parameter set
+    assert errors == {}
+
+
+def test_build_scan_dict_grid_linear_and_log():
+    table = _table(
+        _row("B", lower=1, upper=4, type_=simulations.TYPE_GRID, n=4),
+        _row("C", lower=0.01, upper=100, type_=simulations.TYPE_GRID,
+             scale=simulations.SCALE_LOG, n=5),
+    )
+    scan, errors = simulations.build_scan_dict_from_table(table)
+
+    assert errors == {}
+    assert scan["B"] == [1.0, 2.0, 3.0, 4.0]
+    assert scan["C"] == pytest.approx([0.01, 0.1, 1.0, 10.0, 100.0])
+
+
+def test_build_scan_dict_random_is_not_wired_yet():
+    table = _table(_row("A", type_=simulations.TYPE_RANDOM, lower=0, upper=1))
+    scan, errors = simulations.build_scan_dict_from_table(table)
+
+    assert "A" not in scan
+    assert "M4" in errors["A"]
+
+
+def test_build_scan_dict_single_without_a_value_errors():
+    scan, errors = simulations.build_scan_dict_from_table(_table(_row("A", value=np.nan)))
+
+    assert "A" not in scan
+    assert "Value" in errors["A"]
+
+
+def test_build_scan_dict_collects_errors_without_dropping_good_rows():
+    table = _table(
+        _row("good", value=1.0),
+        _row("bad", lower=10, upper=1, type_=simulations.TYPE_GRID, n=3),  # lower >= upper
+    )
+    scan, errors = simulations.build_scan_dict_from_table(table)
+
+    assert scan == {"good": [1.0]}
+    assert "less than Upper" in errors["bad"]
+
+
+# --- make_timepoints ----------------------------------------------------------
 def test_make_timepoints_spans_zero_to_end_inclusive():
     tps = simulations.make_timepoints(10, 5)
 
     assert tps == [0.0, 2.5, 5.0, 7.5, 10.0]
-    assert tps[0] == 0.0 and tps[-1] == 10.0
     assert len(tps) == 5
     assert all(isinstance(t, float) for t in tps)  # plain Python floats, not np
 
 
-def test_parse_grid_values_parses_comma_separated_numbers():
-    assert simulations.parse_grid_values("0.1, 1, 10") == [0.1, 1.0, 10.0]
-    assert simulations.parse_grid_values("5") == [5.0]
-
-
-def test_parse_grid_values_blank_means_hold():
-    assert simulations.parse_grid_values("") is None
-    assert simulations.parse_grid_values("   ") is None
-    assert simulations.parse_grid_values(" , , ") is None  # only commas → hold
-
-
-def test_parse_grid_values_tolerates_trailing_and_double_commas():
-    assert simulations.parse_grid_values("1, 2,") == [1.0, 2.0]
-    assert simulations.parse_grid_values("1,,2") == [1.0, 2.0]
-
-
-def test_parse_grid_values_rejects_non_numbers_with_friendly_message():
-    with pytest.raises(ValueError, match="isn't a number"):
-        simulations.parse_grid_values("1, abc, 3")
-
-
-def test_build_scan_dict_with_no_overrides_holds_everything():
-    skeleton = {"drug": None, "k_off": None}
-    assert simulations.build_scan_dict(skeleton, {}) == {"drug": None, "k_off": None}
-
-
-def test_build_scan_dict_applies_overrides_and_holds_the_rest():
-    skeleton = {"drug": None, "k_off": None, "Receptor_0": None}
-    scan = simulations.build_scan_dict(skeleton, {"drug": [0.1, 1.0, 10.0]})
-
-    assert scan == {"drug": [0.1, 1.0, 10.0], "k_off": None, "Receptor_0": None}
-
-
-def test_build_scan_dict_treats_none_override_as_hold():
-    skeleton = {"drug": None, "k_off": None}
-    # e.g. user picked "scan" for drug but left the values box blank → None.
-    scan = simulations.build_scan_dict(skeleton, {"drug": None})
-
-    assert scan == {"drug": None, "k_off": None}
-
-
-def test_build_scan_dict_rejects_unknown_inputs():
-    skeleton = {"drug": None}
-    with pytest.raises(ValueError, match="Unknown input"):
-        simulations.build_scan_dict(skeleton, {"not_a_real_input": [1.0]})
-
-
+# --- run ----------------------------------------------------------------------
 def test_run_forwards_args_and_returns_package_result(monkeypatch, stub_model_state):
     seen = {}
     sentinel = object()  # stand-in for the DataFrame the package returns
@@ -149,15 +207,15 @@ def test_run_restores_initial_state_even_when_the_run_raises(monkeypatch, stub_m
 
 
 def test_run_restores_model_state_so_held_inputs_stay_at_default():
-    # Real integration (no stubs): a scan must not pollute a later hold-all run.
-    # This is the regression guard for the shared-model state-leak bug.
+    # Real integration (no stubs): a scan must not pollute a later default run.
+    # This is the regression guard for the shared-model state-leak bug. An empty
+    # scan_dict ({}) runs once at the model's defaults ("hold everything").
     path = next(p for p in simulations.bsc.get_examples() if "brusselator" in p.lower())
     model = simulations.bsc.load_model(path)
-    skeleton = simulations.get_inputs(model)
     timepoints = simulations.make_timepoints(100, 50)
 
-    pristine = simulations.run(model, dict(skeleton), timepoints)
-    simulations.run(model, {**skeleton, "X": [0.1, 1.0, 10.0]}, timepoints)  # mutates
-    after = simulations.run(model, dict(skeleton), timepoints)
+    pristine = simulations.run(model, {}, timepoints)
+    simulations.run(model, {"X": [0.1, 1.0, 10.0]}, timepoints)  # mutates initial X
+    after = simulations.run(model, {}, timepoints)
 
     pd.testing.assert_frame_equal(pristine, after)
