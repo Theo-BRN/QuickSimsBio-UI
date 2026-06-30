@@ -15,6 +15,7 @@ import streamlit as st
 # app/ is on sys.path when Streamlit runs this file, so sibling modules import
 # as top-level names (this mirrors how the tests are configured).
 import models
+import simulations
 
 st.set_page_config(page_title="QuickSimsBio", page_icon="🧪", layout="centered")
 
@@ -38,6 +39,32 @@ def load_model(kind: str, ref: str):
     need to be careful not to mutate this shared object.
     """
     return models.load_model({"kind": kind, "ref": ref})
+
+
+@st.cache_data(show_spinner=False)
+def get_inputs_cached(kind: str, ref: str) -> dict:
+    """The model's input skeleton (``{input_name: None}``), cached per model.
+
+    Same pattern as ``run_cached``: keyed on the hashable ``(kind, ref)`` and the
+    live model handle re-fetched from the cache_resource loader inside. The
+    result is a plain dict, so cache_data stores it happily.
+    """
+    model = load_model(kind, ref)
+    return simulations.get_inputs(model)
+
+
+@st.cache_data(show_spinner="Running simulation…")
+def run_cached(kind: str, ref: str, scan_dict: dict, timepoints: list[float]):
+    """Run a simulation, cached so identical runs return instantly.
+
+    Keyed on the *hashable* inputs — the source tags ``(kind, ref)``, the
+    ``scan_dict``, and the ``timepoints`` (cache_data hashes dicts/lists by
+    value). We deliberately do NOT take the live model handle as an argument:
+    a COPASI model isn't hashable, so we re-fetch it from the cache_resource
+    loader inside instead (that call is itself cached, so it's free).
+    """
+    model = load_model(kind, ref)
+    return simulations.run(model, scan_dict, timepoints)
 
 
 @st.dialog("Use a custom model")
@@ -123,3 +150,61 @@ except Exception as exc:  # broad on purpose: show a friendly message, not a tra
     st.stop()
 
 st.success(f"Loaded **{choice}**.")
+
+# --- Run a simulation ---------------------------------------------------------
+# Inputs default to "Hold" (model default). Switch one to "Scan" and give a list
+# of values to sweep it. The result is shown as a raw table — adaptive plots come
+# later (M4). main.py only wires widgets to the pure adapter functions in
+# simulations.py; the parsing/validation lives there so it stays testable.
+st.subheader("Run a simulation")
+
+inputs = get_inputs_cached(source["kind"], source["ref"])
+
+# Collect the inputs the user chose to scan. parse_grid_values turns the typed
+# text into a list (or None = hold); a bad entry raises, which we surface inline.
+overrides: dict[str, list[float] | None] = {}
+input_errors: dict[str, str] = {}
+with st.expander(f"Inputs ({len(inputs)})", expanded=False):
+    st.caption(
+        "Anything left on **Hold** stays at the model's default. Switch an input "
+        "to **Scan** and enter values to sweep it (e.g. `0.1, 1, 10`)."
+    )
+    for name in inputs:
+        col_mode, col_vals = st.columns([1, 2])
+        mode = col_mode.selectbox(name, ["Hold", "Scan"], key=f"mode_{name}")
+        if mode == "Scan":
+            text = col_vals.text_input(
+                name,
+                key=f"vals_{name}",
+                placeholder="e.g. 0.1, 1, 10",
+                label_visibility="collapsed",
+            )
+            try:
+                overrides[name] = simulations.parse_grid_values(text)
+            except ValueError as exc:
+                input_errors[name] = str(exc)
+
+for name, message in input_errors.items():
+    st.error(f"**{name}**: {message}")
+
+col_time, col_points = st.columns(2)
+end_time = col_time.number_input(
+    "Simulation time",
+    min_value=0.0,
+    value=1000.0,
+    step=100.0,
+    help="Length of the time course, in the model's own time units.",
+)
+n_points = col_points.number_input(
+    "Number of points",
+    min_value=2,
+    value=300,
+    step=50,
+    help="How many timepoints to record across the run.",
+)
+
+if st.button("Run simulation", type="primary", disabled=bool(input_errors)):
+    scan_dict = simulations.build_scan_dict(inputs, overrides)
+    timepoints = simulations.make_timepoints(end_time, int(n_points))
+    result = run_cached(source["kind"], source["ref"], scan_dict, timepoints)
+    st.dataframe(result, use_container_width=True)
