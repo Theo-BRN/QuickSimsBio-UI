@@ -16,6 +16,7 @@ import streamlit as st
 # app/ is on sys.path when Streamlit runs this file, so sibling modules import
 # as top-level names (this mirrors how the tests are configured).
 import models
+import plotting
 import simulations
 
 st.set_page_config(page_title="QuickSimsBio", page_icon="🧪", layout="centered")
@@ -211,7 +212,62 @@ n_points = col_points.number_input(
     help="How many timepoints to record across the run.",
 )
 
+# Streamlit re-runs this whole script on *every* widget change. If we rendered the
+# results inside the `if run_clicked:` block, the plot would vanish the moment the
+# user touched a plot control (that rerun has run_clicked == False). So on click we
+# only stash the *request* in session_state; the actual results + their controls are
+# rendered below, outside the button block. run_cached makes the re-fetch free, so
+# changing a plot control re-renders WITHOUT re-simulating.
 if st.button("Run simulation", type="primary", disabled=bool(input_errors)):
-    timepoints = simulations.make_timepoints(end_time, int(n_points))
-    result = run_cached(source["kind"], source["ref"], scan_dict, timepoints)
-    st.dataframe(result, use_container_width=True)
+    st.session_state["last_run"] = {
+        "kind": source["kind"],
+        "ref": source["ref"],
+        "scan_dict": scan_dict,
+        "timepoints": simulations.make_timepoints(end_time, int(n_points)),
+        "scales": simulations.input_scales_from_table(edited),
+    }
+
+# --- Results (adaptive plot) --------------------------------------------------
+# Only show a result for the model that's currently selected — switching models
+# leaves the old run in session_state, but it isn't this model's, so we skip it.
+last_run = st.session_state.get("last_run")
+if last_run and (last_run["kind"], last_run["ref"]) == (source["kind"], source["ref"]):
+    wide, long = run_cached(
+        last_run["kind"], last_run["ref"], last_run["scan_dict"], last_run["timepoints"]
+    )
+
+    # The plot morphs to how many inputs were scanned (see plotting.mode):
+    # 0 varying -> kinetics vs time, 1 -> output vs that input, 2+ -> scatter.
+    varying = plotting.varying_inputs(last_run["scan_dict"])
+    mode = plotting.mode(last_run["scan_dict"])
+    if mode in (plotting.MODE_KINETICS, plotting.MODE_VS_INPUT):
+        plot_type = st.radio(
+            "Plot type", plotting.PLOT_TYPES, horizontal=True, key="plot_type"
+        )
+        if mode == plotting.MODE_KINETICS:
+            fig = plotting.kinetics_figure(long, plot_type=plot_type)
+        else:
+            fig = plotting.vs_input_figure(
+                long, last_run["scan_dict"], last_run["scales"], plot_type=plot_type
+            )
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        # 2+ scanned inputs: a scatter of one output (colour, or z+colour in 3-D)
+        # over two chosen inputs. These pickers live outside the Run block, so
+        # changing them re-renders from the cached result without re-simulating.
+        outputs = sorted(long[plotting.COL_OUTPUT_TYPE].unique())
+        col_out, col_x, col_y = st.columns(3)
+        output_type = col_out.selectbox("Output", outputs, key="scatter_output")
+        x_input = col_x.selectbox("X axis", varying, index=0, key="scatter_x")
+        y_input = col_y.selectbox("Y axis", varying, index=1, key="scatter_y")
+        three_d = st.toggle("3-D view", key="scatter_3d")
+        st.plotly_chart(
+            plotting.scatter_figure(
+                long, last_run["scan_dict"], last_run["scales"],
+                x_input, y_input, output_type, three_d=three_d,
+            ),
+            use_container_width=True,
+        )
+
+    with st.expander("Raw results table"):
+        st.dataframe(wide, use_container_width=True)

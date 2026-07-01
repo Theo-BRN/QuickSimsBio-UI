@@ -179,6 +179,18 @@ def build_scan_dict_from_table(table: pd.DataFrame) -> tuple[dict, dict]:
     return scan_dict, errors
 
 
+def input_scales_from_table(table: pd.DataFrame) -> dict[str, str]:
+    """Map each input name to its Scale (``"Linear"`` / ``"Log"``) from the table.
+
+    The scan_dict alone can't tell plotting which axes are logarithmic — a Log grid
+    is just a plain ``geomspace`` list of real values, indistinguishable from a
+    linear one. The "this was Log" flag lives only in the table's Scale column, so
+    we lift it out here (keyed by input name) for the plot layer to apply to the
+    matching axis. Mirrors ``build_scan_dict_from_table``'s row iteration.
+    """
+    return {row[COL_PARAM]: row[COL_SCALE] for row in table.to_dict("records")}
+
+
 # --- Running ------------------------------------------------------------------
 def make_timepoints(end: float, n_points: int) -> list[float]:
     """Evenly spaced timepoints from 0 to ``end`` inclusive, ``n_points`` of them.
@@ -191,15 +203,23 @@ def make_timepoints(end: float, n_points: int) -> list[float]:
 
 
 def run(model, scan_dict: dict, timepoints: list[float] | None = None):
-    """Run time-course simulations for ``scan_dict`` and return a wide DataFrame.
+    """Run time-course simulations for ``scan_dict``; return ``(wide, long)`` frames.
 
     Thin wrapper over ``qsb.run_simulations``. Single values run one point each;
     grid lists scan a grid. ``model`` is passed explicitly (not via basico's
     global current-model state).
 
-    The returned DataFrame is wide: a ``Time`` column, one column per output
-    species, the varied-input columns, and a ``Sim_Num`` column identifying each
-    parameter set.
+    We request ``format_output="both"``, so the package hands back ``[wide, long]``
+    and we return them as a tuple:
+
+    - **wide** — a ``Time`` column, one column per output species, the varied-input
+      columns, and a ``Sim_Num`` column. Human-friendly; drives the results table
+      (and, later, the CSV export).
+    - **long** — the same data melted to ``Time`` + varied-input columns +
+      ``Model_Output_Type`` (which species) + ``Model_Output`` (the value); note it
+      has **no** ``Sim_Num``. This is the shape the plot builders consume. The melt
+      is done by the package (``auto_melt``), which needs the model handle — so it
+      has to come from the package, not a UI-side reshape.
 
     **Why the snapshot/restore:** ``run_simulations`` sets each scanned input as a
     new *initial* value on the model and never puts it back. Because the app
@@ -211,6 +231,9 @@ def run(model, scan_dict: dict, timepoints: list[float] | None = None):
     """
     snapshot = _snapshot_initial_state(model)
     try:
-        return qsb.run_simulations(scan_dict, timepoints=timepoints, model=model)
+        wide, long = qsb.run_simulations(
+            scan_dict, timepoints=timepoints, format_output="both", model=model
+        )
+        return wide, long
     finally:
         _restore_initial_state(model, snapshot)

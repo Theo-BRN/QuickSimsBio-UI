@@ -156,6 +156,19 @@ def test_build_scan_dict_collects_errors_without_dropping_good_rows():
     assert "less than Upper" in errors["bad"]
 
 
+# --- input_scales_from_table --------------------------------------------------
+def test_input_scales_from_table_maps_each_input_to_its_scale():
+    table = _table(
+        _row("A", value=1.0),  # Single ⇒ Linear (the default)
+        _row("B", lower=0.1, upper=10, type_=simulations.TYPE_GRID,
+             scale=simulations.SCALE_LOG, n=5),
+    )
+    assert simulations.input_scales_from_table(table) == {
+        "A": simulations.SCALE_LINEAR,
+        "B": simulations.SCALE_LOG,
+    }
+
+
 # --- make_timepoints ----------------------------------------------------------
 def test_make_timepoints_spans_zero_to_end_inclusive():
     tps = simulations.make_timepoints(10, 5)
@@ -166,27 +179,33 @@ def test_make_timepoints_spans_zero_to_end_inclusive():
 
 
 # --- run ----------------------------------------------------------------------
-def test_run_forwards_args_and_returns_package_result(monkeypatch, stub_model_state):
+def test_run_forwards_args_and_returns_wide_long_pair(monkeypatch, stub_model_state):
     seen = {}
-    sentinel = object()  # stand-in for the DataFrame the package returns
+    wide, long = object(), object()  # stand-ins for the two DataFrames
 
-    def fake_run_simulations(scan_dict, timepoints=None, model=None, **kwargs):
-        seen.update(scan_dict=scan_dict, timepoints=timepoints, model=model)
-        return sentinel
+    def fake_run_simulations(
+        scan_dict, timepoints=None, format_output=None, model=None, **kwargs
+    ):
+        seen.update(
+            scan_dict=scan_dict, timepoints=timepoints,
+            format_output=format_output, model=model,
+        )
+        return [wide, long]  # the package returns [wide, long] for format_output="both"
 
     monkeypatch.setattr(simulations.qsb, "run_simulations", fake_run_simulations)
     out = simulations.run("MODEL", {"drug": [1, 2]}, timepoints=[0, 1, 2])
 
-    assert out is sentinel
+    assert out == (wide, long)  # run unpacks the pair and returns it as a tuple
     assert seen == {
         "scan_dict": {"drug": [1, 2]},
         "timepoints": [0, 1, 2],
+        "format_output": "both",
         "model": "MODEL",
     }
 
 
 def test_run_restores_initial_state_after_running(monkeypatch, stub_model_state):
-    monkeypatch.setattr(simulations.qsb, "run_simulations", lambda *a, **k: "df")
+    monkeypatch.setattr(simulations.qsb, "run_simulations", lambda *a, **k: ["wide", "long"])
     simulations.run("MODEL", {"X": [0.1, 1, 10]})
 
     # The snapshot ({"X": 3.0} species, {"k": 2.0} param) is written back verbatim.
@@ -214,8 +233,8 @@ def test_run_restores_model_state_so_held_inputs_stay_at_default():
     model = simulations.bsc.load_model(path)
     timepoints = simulations.make_timepoints(100, 50)
 
-    pristine = simulations.run(model, {}, timepoints)
+    pristine_wide, _ = simulations.run(model, {}, timepoints)
     simulations.run(model, {"X": [0.1, 1.0, 10.0]}, timepoints)  # mutates initial X
-    after = simulations.run(model, {}, timepoints)
+    after_wide, _ = simulations.run(model, {}, timepoints)
 
-    pd.testing.assert_frame_equal(pristine, after)
+    pd.testing.assert_frame_equal(pristine_wide, after_wide)
