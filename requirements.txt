@@ -1,0 +1,9 @@
+# Streamlit Community Cloud runs `pip`, not Poetry
+# (a root requirements.txt outranks pyproject.toml on the cloud build).
+#
+# Keep the top three in sync with pyproject.toml's [project] dependencies.
+# quicksimsbio is fetched from GitHub instead of locally (local is for dev only)
+streamlit>=1.58,<2.0
+copasi-basico>=0.86,<0.87
+plotly>=6.8,<7.0
+quicksimsbio @ git+https://github.com/Theo-BRN/QuickSimsBio.git@main
