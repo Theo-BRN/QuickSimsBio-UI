@@ -232,42 +232,60 @@ if st.button("Run simulation", type="primary", disabled=bool(input_errors)):
 # leaves the old run in session_state, but it isn't this model's, so we skip it.
 last_run = st.session_state.get("last_run")
 if last_run and (last_run["kind"], last_run["ref"]) == (source["kind"], source["ref"]):
-    wide, long = run_cached(
-        last_run["kind"], last_run["ref"], last_run["scan_dict"], last_run["timepoints"]
-    )
+    # Some models / parameter combos fail inside COPASI, and the long-format path
+    # can throw for others. Non-technical users can't read a traceback, so we
+    # degrade gracefully: a failed *run* shows a friendly message and stops; a
+    # failed *plot* still keeps the raw data (shown below) so nothing is lost.
+    try:
+        wide, long = run_cached(
+            last_run["kind"], last_run["ref"], last_run["scan_dict"], last_run["timepoints"]
+        )
+    except Exception as exc:  # broad on purpose: a message, not a traceback
+        st.error(
+            "This model couldn't complete the simulation for those settings. "
+            "Try different inputs, or another model."
+        )
+        with st.expander("What went wrong?"):
+            st.write(str(exc))
+        st.stop()
 
     # The plot morphs to how many inputs were scanned (see plotting.mode):
     # 0 varying -> kinetics vs time, 1 -> output vs that input, 2+ -> scatter.
     varying = plotting.varying_inputs(last_run["scan_dict"])
     mode = plotting.mode(last_run["scan_dict"])
-    if mode in (plotting.MODE_KINETICS, plotting.MODE_VS_INPUT):
-        plot_type = st.radio(
-            "Plot type", plotting.PLOT_TYPES, horizontal=True, key="plot_type"
-        )
-        if mode == plotting.MODE_KINETICS:
-            fig = plotting.kinetics_figure(long, plot_type=plot_type)
-        else:
-            fig = plotting.vs_input_figure(
-                long, last_run["scan_dict"], last_run["scales"], plot_type=plot_type
+    try:
+        if mode in (plotting.MODE_KINETICS, plotting.MODE_VS_INPUT):
+            plot_type = st.radio(
+                "Plot type", plotting.PLOT_TYPES, horizontal=True, key="plot_type"
             )
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        # 2+ scanned inputs: a scatter of one output (colour, or z+colour in 3-D)
-        # over two chosen inputs. These pickers live outside the Run block, so
-        # changing them re-renders from the cached result without re-simulating.
-        outputs = sorted(long[plotting.COL_OUTPUT_TYPE].unique())
-        col_out, col_x, col_y = st.columns(3)
-        output_type = col_out.selectbox("Output", outputs, key="scatter_output")
-        x_input = col_x.selectbox("X axis", varying, index=0, key="scatter_x")
-        y_input = col_y.selectbox("Y axis", varying, index=1, key="scatter_y")
-        three_d = st.toggle("3-D view", key="scatter_3d")
-        st.plotly_chart(
-            plotting.scatter_figure(
-                long, last_run["scan_dict"], last_run["scales"],
-                x_input, y_input, output_type, three_d=three_d,
-            ),
-            use_container_width=True,
-        )
+            if mode == plotting.MODE_KINETICS:
+                fig = plotting.kinetics_figure(long, plot_type=plot_type)
+            else:
+                fig = plotting.vs_input_figure(
+                    long, last_run["scan_dict"], last_run["scales"], plot_type=plot_type
+                )
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            # 2+ scanned inputs: a scatter of one output (colour, or z+colour in 3-D)
+            # over two chosen inputs. These pickers live outside the Run block, so
+            # changing them re-renders from the cached result without re-simulating.
+            outputs = sorted(long[plotting.COL_OUTPUT_TYPE].unique())
+            col_out, col_x, col_y = st.columns(3)
+            output_type = col_out.selectbox("Output", outputs, key="scatter_output")
+            x_input = col_x.selectbox("X axis", varying, index=0, key="scatter_x")
+            y_input = col_y.selectbox("Y axis", varying, index=1, key="scatter_y")
+            three_d = st.toggle("3-D view", key="scatter_3d")
+            st.plotly_chart(
+                plotting.scatter_figure(
+                    long, last_run["scan_dict"], last_run["scales"],
+                    x_input, y_input, output_type, three_d=three_d,
+                ),
+                use_container_width=True,
+            )
+    except Exception as exc:  # broad on purpose: keep the data, explain the plot
+        st.warning("Couldn't draw a plot for this result — here's the raw data instead.")
+        with st.expander("What went wrong?"):
+            st.write(str(exc))
 
     with st.expander("Raw results table"):
         st.dataframe(wide, use_container_width=True)

@@ -15,6 +15,8 @@ about the frame) so it can be unit-tested without a running app. ``main.py`` rea
 the widget selections and calls one builder.
 """
 
+import re
+
 import numpy as np
 import plotly.express as px
 
@@ -110,18 +112,36 @@ def reduce_final_timepoint(long_df):
     return long_df[long_df[COL_TIME] == last]
 
 
+def _column_names_input(col: str, name: str) -> bool:
+    """True if a long-frame column is the one COPASI named after input ``name``.
+
+    COPASI names an input's column after the input itself — a species ``X`` →
+    ``[X]_0``, a global parameter ``P`` → ``Values[P]`` — so the input name is the
+    text inside the column's brackets. We pull out every bracketed token and check
+    for an exact match. This is what tells apart two inputs scanned over *identical*
+    ranges (e.g. ``kG+`` vs ``kG-``), which a value-match alone cannot.
+    """
+    return name in re.findall(r"\[([^\[\]]*)\]", col)
+
+
 def column_for_input(long_df, scan_dict: dict, name: str) -> str:
     """Find the long-frame column that carries a varying input's values.
 
     The column name is model/type-dependent — a species input ``X`` lands in
-    ``[X]_0`` while a global parameter ``P`` lands in ``Values[P]`` — so rather than
-    guess the name we match by **value**: the axis column whose set of unique values
-    equals the input's scanned values (compared with a float tolerance).
+    ``[X]_0`` while a global parameter ``P`` lands in ``Values[P]`` — so we first
+    collect every axis column whose set of unique values equals the input's scanned
+    values (compared with a float tolerance).
 
-    Some COPASI models drive a parameter from an "Initial for <p>" helper quantity,
-    so scanning ``p`` moves *both* ``Values[p]`` and ``Values[Initial for p]`` — two
-    columns with identical values. They plot to the same x-positions, but we prefer
-    the real quantity (no "Initial for") for the axis label.
+    Value-match alone is ambiguous when two inputs are scanned over the *same* range:
+    their value-sets are identical, so both would grab the same column and collapse x
+    and y onto one axis. So among the value-matches we prefer the column actually
+    **named** after this input (``_column_names_input``); only if none is named do we
+    fall back to the raw value-matches (keeps working for oddly-named columns).
+
+    Some COPASI models also drive a parameter from an "Initial for <p>" helper
+    quantity, so scanning ``p`` moves *both* ``Values[p]`` and ``Values[Initial for
+    p]`` — two columns with identical values. They plot to the same x-positions, but
+    we prefer the real quantity (no "Initial for") for the axis label.
     """
     wanted = np.sort(np.unique(np.asarray(scan_dict[name], dtype=float)))
     matches = [
@@ -133,8 +153,10 @@ def column_for_input(long_df, scan_dict: dict, name: str) -> str:
     ]
     if not matches:
         raise KeyError(f"No varying column in the result matches input {name!r}.")
-    real = [col for col in matches if "Initial for" not in col]
-    return (real or matches)[0]
+    named = [col for col in matches if _column_names_input(col, name)]
+    candidates = named or matches
+    real = [col for col in candidates if "Initial for" not in col]
+    return (real or candidates)[0]
 
 
 # --- Figure builders (pure; long frame -> plotly Figure) ----------------------
