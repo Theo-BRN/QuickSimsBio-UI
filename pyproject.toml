@@ -20,3 +20,13 @@ build-backend = "poetry.core.masonry.api"
 
 [tool.poetry.dependencies]
 quicksimsbio = {develop = true}
+
+[tool.pytest.ini_options]
+# tests need app added here to allow imports
+pythonpath = ["app"]
+
+[dependency-groups]
+# pytest is dev only
+dev = [
+    "pytest (>=9.1.1,<10.0.0)"
+]
