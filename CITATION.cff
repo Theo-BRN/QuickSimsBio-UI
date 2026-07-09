@@ -1,0 +1,39 @@
+cff-version: 1.2.0
+message: "If you use QuickSimsBio-UI in your research, please cite it as below."
+title: QuickSimsBio-UI
+abstract: >-
+  A lightweight Streamlit-based user interface using QuickSimsBio and basico (the Python interface to
+  COPASI). Meant for simple quick simulations of any model.
+type: software
+authors:
+  - family-names: Redfern-Nichols
+    given-names: Theo
+    orcid: "https://orcid.org/0009-0000-7503-4510"
+    email: theobrn@liverpool.ac.uk
+    affiliation: "Department of Molecular and Clinical Cancer Medicine, University of Liverpool"
+  - family-names: Hood
+    given-names: Fiona
+    orcid: "https://orcid.org/0009-0009-7639-4695"
+    email: fehood@liverpool.ac.uk
+    affiliation: "Department of Molecular and Clinical Cancer Medicine, University of Liverpool"
+  - family-names: Ladds
+    given-names: Graham
+    orcid: "https://orcid.org/0000-0001-7320-9612"
+    email: grl30@cam.ac.uk
+    affiliation: "Department of Pharmacology, University of Cambridge"
+  - family-names: Prior
+    given-names: Ian
+    orcid: "https://orcid.org/0000-0002-4055-5161"
+    email: iprior@liv.ac.uk
+    affiliation: "Department of Molecular and Clinical Cancer Medicine, University of Liverpool"
+version: 0.1.0
+license: MIT
+repository-code: "https://github.com/Theo-BRN/QuickSimsBio-UI"
+url: "https://github.com/Theo-BRN/QuickSimsBio-UI"
+keywords:
+  - systems biology
+  - COPASI
+  - basico
+  - ODE
+  - parameter scanning
+  - streamlit
