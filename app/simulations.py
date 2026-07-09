@@ -20,9 +20,7 @@ logic testable.
 import basico as bsc
 import numpy as np
 import pandas as pd
-
 import quicksimsbio as qsb
-
 
 # --- Inputs-table schema ------------------------------------------------------
 # Column names and the cell values for the Type / Scale dropdowns. Defined once
@@ -39,8 +37,7 @@ INPUT_COLUMNS = [COL_PARAM, COL_VALUE, COL_LOWER, COL_UPPER, COL_TYPE, COL_SCALE
 
 TYPE_SINGLE = "Single"
 TYPE_GRID = "Grid"
-TYPE_RANDOM = "Random (WIP)"  # visible but not wired until M4
-INPUT_TYPES = [TYPE_SINGLE, TYPE_GRID, TYPE_RANDOM]
+INPUT_TYPES = [TYPE_SINGLE, TYPE_GRID]
 
 SCALE_LINEAR = "Linear"
 SCALE_LOG = "Log"
@@ -58,7 +55,9 @@ def _snapshot_initial_state(model) -> tuple[dict, dict]:
     """
     species = bsc.get_species(model=model)
     params = bsc.get_parameters(model=model)
-    species_state = {} if species is None else species["initial_concentration"].to_dict()
+    species_state = (
+        {} if species is None else species["initial_concentration"].to_dict()
+    )
     param_state = {} if params is None else params["initial_value"].to_dict()
     return species_state, param_state
 
@@ -144,7 +143,6 @@ def build_scan_dict_from_table(table: pd.DataFrame) -> tuple[dict, dict]:
 
     - ``Single`` → ``[value]`` (a one-point "grid" — holds/sets that input).
     - ``Grid``   → a list from ``_grid_values`` (Linear or Log).
-    - ``Random (WIP)`` → not built yet; recorded as an error (lands in M4).
 
     Returns ``(scan_dict, errors)`` where ``errors`` maps an input name to a
     friendly message. The UI shows those and disables Run while any exist, so a
@@ -164,12 +162,10 @@ def build_scan_dict_from_table(table: pd.DataFrame) -> tuple[dict, dict]:
                 scan_dict[name] = [float(value)]
             elif input_type == TYPE_GRID:
                 scan_dict[name] = _grid_values(
-                    row[COL_LOWER], row[COL_UPPER], row[COL_N],
+                    row[COL_LOWER],
+                    row[COL_UPPER],
+                    row[COL_N],
                     log=row[COL_SCALE] == SCALE_LOG,
-                )
-            elif input_type == TYPE_RANDOM:
-                raise ValueError(
-                    "Random scans are coming in M4 — use Single or Grid for now."
                 )
             else:
                 raise ValueError(f"Unknown type {input_type!r}.")

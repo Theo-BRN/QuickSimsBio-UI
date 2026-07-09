@@ -11,13 +11,12 @@ expensive work (listing examples, loading a model) is wrapped in caches below.
 from math import prod
 from pathlib import Path
 
-import streamlit as st
-
 # app/ is on sys.path when Streamlit runs this file, so sibling modules import
 # as top-level names (this mirrors how the tests are configured).
 import models
 import plotting
 import simulations
+import streamlit as st
 
 st.set_page_config(page_title="QuickSimsBio", page_icon="🧪", layout="centered")
 
@@ -165,7 +164,9 @@ st.subheader("Run a simulation")
 # A fresh editor per model (key includes kind/ref) so switching models doesn't
 # carry edits across; the cached default table is the stable baseline and the
 # editor's `key` persists the user's edits, so we read the *return* value.
-default_table = simulations.default_input_table(get_inputs_cached(source["kind"], source["ref"]))
+default_table = simulations.default_input_table(
+    get_inputs_cached(source["kind"], source["ref"])
+)
 edited = st.data_editor(
     default_table,
     key=f"input_editor::{source['kind']}::{source['ref']}",
@@ -173,18 +174,30 @@ edited = st.data_editor(
     use_container_width=True,
     column_config={
         simulations.COL_PARAM: st.column_config.TextColumn("Input", disabled=True),
-        simulations.COL_VALUE: st.column_config.NumberColumn("Value", help="Used when Type is Single."),
-        simulations.COL_LOWER: st.column_config.NumberColumn("Lower", help="Grid lower bound."),
-        simulations.COL_UPPER: st.column_config.NumberColumn("Upper", help="Grid upper bound."),
+        simulations.COL_VALUE: st.column_config.NumberColumn(
+            "Value", help="Used when Type is Single."
+        ),
+        simulations.COL_LOWER: st.column_config.NumberColumn(
+            "Lower", help="Grid lower bound."
+        ),
+        simulations.COL_UPPER: st.column_config.NumberColumn(
+            "Upper", help="Grid upper bound."
+        ),
         simulations.COL_TYPE: st.column_config.SelectboxColumn(
-            "Type", options=simulations.INPUT_TYPES, required=True,
-            help="Single = fixed value · Grid = sweep Lower→Upper · Random arrives in M4.",
+            "Type",
+            options=simulations.INPUT_TYPES,
+            required=True,
+            help="Single = fixed value · Grid = sweep Lower→Upper.",
         ),
         simulations.COL_SCALE: st.column_config.SelectboxColumn(
-            "Scale", options=simulations.INPUT_SCALES, required=True,
+            "Scale",
+            options=simulations.INPUT_SCALES,
+            required=True,
             help="Linear or logarithmic spacing for a Grid scan.",
         ),
-        simulations.COL_N: st.column_config.NumberColumn("n", step=1, help="Number of grid points."),
+        simulations.COL_N: st.column_config.NumberColumn(
+            "n", step=1, help="Number of grid points."
+        ),
     },
 )
 scan_dict, input_errors = simulations.build_scan_dict_from_table(edited)
@@ -238,7 +251,10 @@ if last_run and (last_run["kind"], last_run["ref"]) == (source["kind"], source["
     # failed *plot* still keeps the raw data (shown below) so nothing is lost.
     try:
         wide, long = run_cached(
-            last_run["kind"], last_run["ref"], last_run["scan_dict"], last_run["timepoints"]
+            last_run["kind"],
+            last_run["ref"],
+            last_run["scan_dict"],
+            last_run["timepoints"],
         )
     except Exception as exc:  # broad on purpose: a message, not a traceback
         st.error(
@@ -277,13 +293,20 @@ if last_run and (last_run["kind"], last_run["ref"]) == (source["kind"], source["
             three_d = st.toggle("3-D view", key="scatter_3d")
             st.plotly_chart(
                 plotting.scatter_figure(
-                    long, last_run["scan_dict"], last_run["scales"],
-                    x_input, y_input, output_type, three_d=three_d,
+                    long,
+                    last_run["scan_dict"],
+                    last_run["scales"],
+                    x_input,
+                    y_input,
+                    output_type,
+                    three_d=three_d,
                 ),
                 use_container_width=True,
             )
     except Exception as exc:  # broad on purpose: keep the data, explain the plot
-        st.warning("Couldn't draw a plot for this result — here's the raw data instead.")
+        st.warning(
+            "Couldn't draw a plot for this result — here's the raw data instead."
+        )
         with st.expander("What went wrong?"):
             st.write(str(exc))
 
