@@ -7,6 +7,9 @@ unit tests in ``test_simulations.py``. Here we check the table *renders* with th
 right defaults and that a default (all-Single) run produces a results table.
 """
 
+from unittest import mock
+
+import streamlit as st
 from streamlit.testing.v1 import AppTest
 
 
@@ -68,3 +71,41 @@ def test_app_runs_a_default_simulation_and_shows_a_results_table():
     results = _result_tables(at)
     assert len(results) == 1
     assert results[0].value["Sim_Num"].nunique() == 1  # one default run
+
+
+def test_app_shows_a_friendly_error_when_a_run_fails():
+    # A failing simulation must degrade to a message, never a traceback. We force
+    # the failure by patching simulations.run to raise (clearing the cache first so
+    # a previously-cached good result can't mask it).
+    st.cache_data.clear()
+    at = AppTest.from_file("app/main.py")
+    at.session_state["selected_model"] = "brusselator"
+    at.run()
+    assert not at.exception
+
+    with mock.patch("simulations.run", side_effect=RuntimeError("boom")):
+        next(b for b in at.button if b.label == "Run simulation").click().run()
+
+    assert not at.exception  # st.stop() is normal control flow, not a crash
+    assert any("complete the simulation" in e.value.lower() for e in at.error)
+    assert _result_tables(at) == []  # no data, so no results table
+
+
+def test_app_keeps_the_raw_table_when_plotting_fails():
+    # If the run succeeds but the figure builder throws, we keep the raw data and
+    # warn — rather than blanking the view. Force it by patching kinetics_figure
+    # (a default all-Single run is 0-D, so kinetics_figure is what gets called).
+    st.cache_data.clear()
+    at = AppTest.from_file("app/main.py")
+    at.session_state["selected_model"] = "brusselator"
+    at.run()
+    assert not at.exception
+
+    at.number_input[1].set_value(20).run()  # shrink the real COPASI run
+
+    with mock.patch("plotting.kinetics_figure", side_effect=RuntimeError("bad fig")):
+        next(b for b in at.button if b.label == "Run simulation").click().run(timeout=60)
+
+    assert not at.exception
+    assert any("raw data" in w.value.lower() for w in at.warning)
+    assert len(_result_tables(at)) == 1  # raw results table still rendered

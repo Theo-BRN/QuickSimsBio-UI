@@ -106,6 +106,25 @@ def test_column_for_input_prefers_real_quantity_over_initial_for_shadow():
     assert plotting.column_for_input(long, {"kL+": [0.5, 1.0, 2.0]}, "kL+") == "Values[kL+]"
 
 
+def test_column_for_input_disambiguates_two_inputs_over_identical_ranges():
+    # Two inputs scanned over the SAME range have identical value-sets, so a
+    # value-match alone can't tell their columns apart (both would grab the first,
+    # collapsing x and y onto one axis). We disambiguate by name, so each input
+    # resolves to its own column.
+    rows = [
+        {"Values[kG+]": a, "Values[kG-]": b, "Time": t,
+         "Model_Output_Type": "[Z]", "Model_Output": a + b + t}
+        for a in (0.5, 1.0, 2.0)
+        for b in (0.5, 1.0, 2.0)
+        for t in (0.0, 1.0)
+    ]
+    long = pd.DataFrame(rows)
+    scan = {"kG+": [0.5, 1.0, 2.0], "kG-": [0.5, 1.0, 2.0]}
+
+    assert plotting.column_for_input(long, scan, "kG+") == "Values[kG+]"
+    assert plotting.column_for_input(long, scan, "kG-") == "Values[kG-]"  # distinct axis
+
+
 # --- kinetics_figure ----------------------------------------------------------
 def test_kinetics_figure_line_has_one_trace_per_species_vs_time():
     long = _kinetics_long(species=("[X]", "[Y]"), times=(0.0, 1.0, 2.0))

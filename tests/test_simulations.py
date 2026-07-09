@@ -130,12 +130,13 @@ def test_build_scan_dict_grid_linear_and_log():
     assert scan["C"] == pytest.approx([0.01, 0.1, 1.0, 10.0, 100.0])
 
 
-def test_build_scan_dict_random_is_not_wired_yet():
-    table = _table(_row("A", type_=simulations.TYPE_RANDOM, lower=0, upper=1))
-    scan, errors = simulations.build_scan_dict_from_table(table)
+def test_build_scan_dict_rejects_an_unknown_type():
+    # The UI can only emit Single/Grid (fixed dropdown), but the adapter still
+    # guards its `else` branch so a stray type surfaces as a friendly error.
+    scan, errors = simulations.build_scan_dict_from_table(_table(_row("A", type_="Bogus")))
 
     assert "A" not in scan
-    assert "M4" in errors["A"]
+    assert "Unknown type" in errors["A"]
 
 
 def test_build_scan_dict_single_without_a_value_errors():
