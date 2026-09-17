@@ -13,3 +13,15 @@ poetry.lock
 
 # VSCode
 .VSCode/
+
+# Notes, Feedback and TODOs
+docs/
+
+# Exploration
+event_examples/
+
+# macOS
+.DS_Store
+
+# Coding Harness Notes
+CLAUDE.md
