@@ -13,6 +13,7 @@ from pathlib import Path
 
 # app/ is on sys.path when Streamlit runs this file, so sibling modules import
 # as top-level names (this mirrors how the tests are configured).
+import events
 import models
 import plotting
 import simulations
@@ -53,6 +54,18 @@ def get_inputs_cached(kind: str, ref: str) -> dict:
     """
     model = load_model(kind, ref)
     return simulations.get_inputs(model)
+
+
+@st.cache_data(show_spinner=False)
+def get_events_cached(kind: str, ref: str):
+    """The model's events (resolved) and its time unit, per model.
+
+    Same cache pattern as ``get_inputs_cached``. ``events.Event`` is a plain frozen
+    dataclass, so the list stores fine in cache_data. Read-only: we only ever
+    display these (see CLAUDE.md > Events).
+    """
+    model = load_model(kind, ref)
+    return events.read_events(model), events.time_unit(model)
 
 
 @st.cache_data(show_spinner="Running simulation…")
@@ -209,21 +222,79 @@ else:
     n_sims = prod(len(values) for values in scan_dict.values())
     st.caption(f"This will run {n_sims} simulation{'s' if n_sims != 1 else ''}.")
 
-col_time, col_points = st.columns(2)
-end_time = col_time.number_input(
-    "Simulation time",
+# Start/end bound the window we *record*, not what COPASI integrates — it always
+# runs from 0, so a later start keeps the model's history (and its events) intact
+# and simply focuses every recorded point on the stretch you care about. See
+# simulations.make_timepoints.
+col_start, col_end, col_points = st.columns(3)
+start_time = col_start.number_input(
+    "Start time",
+    min_value=0.0,
+    value=0.0,
+    step=100.0,
+    help=(
+        "When to start recording. The model always runs from 0, so raising this "
+        "skips nothing — it just puts your points where the action is."
+    ),
+)
+end_time = col_end.number_input(
+    "End time",
     min_value=0.0,
     value=1000.0,
     step=100.0,
-    help="Length of the time course, in the model's own time units.",
+    help="When to stop, in the model's own time units.",
 )
 n_points = col_points.number_input(
     "Number of points",
     min_value=2,
     value=300,
     step=50,
-    help="How many timepoints to record across the run.",
+    help="How many timepoints to record across the window.",
 )
+
+time_error = "Start time must be less than End time." if start_time >= end_time else ""
+if time_error:
+    st.error(time_error)
+
+# --- Events (read-only) -------------------------------------------------------
+# Placed here, next to the time window, because its whole job is to inform that
+# choice: many models only *do* anything after an event that fires far later than
+# the default window reaches. Read-only — we surface events, never edit them (see
+# CLAUDE.md > Events). Wrapped broadly on purpose: Streamlit runs this file top to
+# bottom, so an uncaught error reading a model's events would blank the Run button
+# and results below. A cosmetic, read-only panel must never do that, so on failure
+# we simply show nothing.
+try:
+    model_events, time_unit = get_events_cached(source["kind"], source["ref"])
+except Exception:  # broad on purpose: a missing panel beats a broken page
+    model_events, time_unit = [], ""
+
+if model_events:
+    with st.expander("Events in this model", expanded=False):
+        st.dataframe(
+            events.events_table(model_events),
+            hide_index=True,
+            use_container_width=True,
+        )
+        timeline = events.segments(model_events)
+        if timeline:
+            st.plotly_chart(
+                events.timeline_figure(timeline, end=end_time, unit=time_unit),
+                use_container_width=True,
+            )
+        else:
+            st.caption(
+                "These events are state-based — when they fire depends on the "
+                "simulation, so they can't be placed on a timeline in advance."
+            )
+
+    # The sharp edge this whole feature exists to catch: a run that stops before
+    # its events ever fire (e.g. CTCA's events at ~1e6 vs the default end of 1000).
+    missed = events.missed_events(model_events, end_time)
+    if missed:
+        plural = len(missed) > 1
+        names = ", ".join(event.name for event in missed)
+        st.warning(f"Your run will not include the event{'s' if plural else ''} {names}.")
 
 # Streamlit re-runs this whole script on *every* widget change. If we rendered the
 # results inside the `if run_clicked:` block, the plot would vanish the moment the
@@ -231,12 +302,16 @@ n_points = col_points.number_input(
 # only stash the *request* in session_state; the actual results + their controls are
 # rendered below, outside the button block. run_cached makes the re-fetch free, so
 # changing a plot control re-renders WITHOUT re-simulating.
-if st.button("Run simulation", type="primary", disabled=bool(input_errors)):
+if st.button(
+    "Run simulation", type="primary", disabled=bool(input_errors) or bool(time_error)
+):
     st.session_state["last_run"] = {
         "kind": source["kind"],
         "ref": source["ref"],
         "scan_dict": scan_dict,
-        "timepoints": simulations.make_timepoints(end_time, int(n_points)),
+        "timepoints": simulations.make_timepoints(
+            start_time, end_time, int(n_points)
+        ),
         "scales": simulations.input_scales_from_table(edited),
     }
 

@@ -171,12 +171,20 @@ def test_input_scales_from_table_maps_each_input_to_its_scale():
 
 
 # --- make_timepoints ----------------------------------------------------------
-def test_make_timepoints_spans_zero_to_end_inclusive():
-    tps = simulations.make_timepoints(10, 5)
+def test_make_timepoints_spans_start_to_end_inclusive():
+    tps = simulations.make_timepoints(0, 10, 5)
 
     assert tps == [0.0, 2.5, 5.0, 7.5, 10.0]
     assert len(tps) == 5
     assert all(isinstance(t, float) for t in tps)  # plain Python floats, not np
+
+
+def test_make_timepoints_records_only_a_late_window():
+    # The point of `start`: put every recorded point around a late event rather
+    # than smearing them across the equilibration that precedes it.
+    tps = simulations.make_timepoints(999_990, 1_000_110, 5)
+
+    assert tps == [999_990.0, 1_000_020.0, 1_000_050.0, 1_000_080.0, 1_000_110.0]
 
 
 # --- run ----------------------------------------------------------------------
@@ -232,7 +240,7 @@ def test_run_restores_model_state_so_held_inputs_stay_at_default():
     # scan_dict ({}) runs once at the model's defaults ("hold everything").
     path = next(p for p in simulations.bsc.get_examples() if "brusselator" in p.lower())
     model = simulations.bsc.load_model(path)
-    timepoints = simulations.make_timepoints(100, 50)
+    timepoints = simulations.make_timepoints(0, 100, 50)
 
     pristine_wide, _ = simulations.run(model, {}, timepoints)
     simulations.run(model, {"X": [0.1, 1.0, 10.0]}, timepoints)  # mutates initial X

@@ -12,6 +12,8 @@ from unittest import mock
 import streamlit as st
 from streamlit.testing.v1 import AppTest
 
+import events
+
 
 def _input_editor(at):
     """The inputs-table data_editor (its key starts with 'input_editor')."""
@@ -21,6 +23,11 @@ def _input_editor(at):
 def _result_tables(at):
     """The st.dataframe result tables (everything that isn't the input editor)."""
     return [d for d in at.dataframe if not (d.key and d.key.startswith("input_editor"))]
+
+
+def _number_input(at, label):
+    """A number_input by its label — robust to sibling widgets being added."""
+    return next(n for n in at.number_input if n.label == label)
 
 
 def test_app_renders_model_picker_with_nothing_selected():
@@ -63,7 +70,7 @@ def test_app_runs_a_default_simulation_and_shows_a_results_table():
     at.run()
     assert not at.exception
 
-    at.number_input[1].set_value(20).run()  # number_input[1] = "Number of points"
+    _number_input(at, "Number of points").set_value(20).run()
 
     next(b for b in at.button if b.label == "Run simulation").click().run(timeout=60)
 
@@ -101,7 +108,7 @@ def test_app_keeps_the_raw_table_when_plotting_fails():
     at.run()
     assert not at.exception
 
-    at.number_input[1].set_value(20).run()  # shrink the real COPASI run
+    _number_input(at, "Number of points").set_value(20).run()  # shrink the real run
 
     with mock.patch("plotting.kinetics_figure", side_effect=RuntimeError("bad fig")):
         next(b for b in at.button if b.label == "Run simulation").click().run(timeout=60)
@@ -109,3 +116,51 @@ def test_app_keeps_the_raw_table_when_plotting_fails():
     assert not at.exception
     assert any("raw data" in w.value.lower() for w in at.warning)
     assert len(_result_tables(at)) == 1  # raw results table still rendered
+
+
+# --- events section -----------------------------------------------------------
+# events.read_events is patched so these stay hermetic (no BioModels download).
+# brusselator is the loaded model; only its event list is faked.
+def _late_event():
+    return events.Event(
+        name="add drug", trigger="Time > 1000000", time=1_000_000.0, assignments=()
+    )
+
+
+def test_app_warns_when_the_run_window_misses_a_models_events():
+    st.cache_data.clear()
+    at = AppTest.from_file("app/main.py")
+    at.session_state["selected_model"] = "brusselator"
+
+    # Default End time is 1000; the event fires at 1e6, so the run never reaches it.
+    with mock.patch("events.read_events", return_value=[_late_event()]):
+        at.run()
+
+    assert not at.exception
+    assert any("add drug" in w.value for w in at.warning)
+
+
+def test_app_clears_the_miss_warning_once_the_window_reaches_the_event():
+    st.cache_data.clear()
+    at = AppTest.from_file("app/main.py")
+    at.session_state["selected_model"] = "brusselator"
+
+    with mock.patch("events.read_events", return_value=[_late_event()]):
+        at.run()
+        _number_input(at, "End time").set_value(2_000_000.0).run()
+
+    assert not at.exception
+    assert not any("add drug" in w.value for w in at.warning)
+
+
+def test_app_shows_no_events_section_for_a_model_without_events():
+    st.cache_data.clear()
+    at = AppTest.from_file("app/main.py")
+    at.session_state["selected_model"] = "brusselator"
+
+    with mock.patch("events.read_events", return_value=[]):
+        at.run()
+
+    assert not at.exception
+    assert not any("End time" in w.value for w in at.warning)
+    assert _result_tables(at) == []  # no events table, no results

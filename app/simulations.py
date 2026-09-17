@@ -188,14 +188,24 @@ def input_scales_from_table(table: pd.DataFrame) -> dict[str, str]:
 
 
 # --- Running ------------------------------------------------------------------
-def make_timepoints(end: float, n_points: int) -> list[float]:
-    """Evenly spaced timepoints from 0 to ``end`` inclusive, ``n_points`` of them.
+def make_timepoints(start: float, end: float, n_points: int) -> list[float]:
+    """Evenly spaced timepoints from ``start`` to ``end`` inclusive.
 
-    Mirrors the package's own default (``np.linspace(0, 1000, 300)``). Returns a
-    plain Python list (``.tolist()``) so it stays hashable-by-value for Streamlit
-    caching and easy to assert on in tests.
+    These are the times COPASI **records output at**, not the span it integrates:
+    it always integrates from time 0, so a later ``start`` doesn't skip any of the
+    model's history — events still fire and equilibration still happens, we just
+    don't record the part we don't want.
+
+    That's what makes ``start`` worth having. A model whose drug lands at 1e6 needs
+    a run reaching past 1e6, but recording 300 points across 0 -> 1,000,120 spaces
+    them ~3,334 apart, so *none* land in the 120 units after the drug — the
+    interesting part reads as a flat line. Recording 999,990 -> 1,000,120 instead
+    puts all 300 points where the action is.
+
+    Returns a plain Python list (``.tolist()``) so it stays hashable-by-value for
+    Streamlit caching and easy to assert on in tests.
     """
-    return np.linspace(0, end, n_points).tolist()
+    return np.linspace(start, end, n_points).tolist()
 
 
 def run(model, scan_dict: dict, timepoints: list[float] | None = None):
