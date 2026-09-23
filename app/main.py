@@ -19,7 +19,7 @@ import plotting
 import simulations
 import streamlit as st
 
-st.set_page_config(page_title="QuickSimsBio", page_icon="🧪", layout="centered")
+st.set_page_config(page_title="QuickSimsBio", page_icon="🧪", layout="wide")
 
 
 @st.cache_data(show_spinner=False)
@@ -135,23 +135,31 @@ st.session_state.setdefault("user_models", {})
 registry = models.merge_user_models(get_registry(), st.session_state.user_models)
 options = list(registry)
 
-# Keep selection in our OWN state (not the selectbox's key) so the dialog can set
-# it freely, and feed it back as the index. Feeding the index also restores the
-# choice when the options list changes (e.g. a custom model was just added).
-selected = st.session_state.get("selected_model")
-index = options.index(selected) if selected in options else None
+# Setup lives in the sidebar: a familiar, always-visible home for "what am I
+# simulating?", leaving the whole content area for inputs and results. Sidebar
+# blocks write to the sidebar wherever they appear in the script, so the code can
+# stay in dependency order while the sidebar renders top-to-bottom in the order
+# these blocks run: model, then time, then events, then Run.
+with st.sidebar:
+    st.header("Setup")
 
-# index=None gives the greyed "Choose a model…" placeholder (nothing selected).
-choice = st.selectbox(
-    "Model",
-    options,
-    index=index,
-    placeholder="Choose a model…",
-)
-st.session_state.selected_model = choice  # remember manual selections too
+    # Keep selection in our OWN state (not the selectbox's key) so the dialog can
+    # set it freely, and feed it back as the index. Feeding the index also restores
+    # the choice when the options list changes (e.g. a custom model was just added).
+    selected = st.session_state.get("selected_model")
+    index = options.index(selected) if selected in options else None
 
-if st.button("Use custom model"):
-    use_custom_model_dialog()
+    # index=None gives the greyed "Choose a model…" placeholder (nothing selected).
+    choice = st.selectbox(
+        "Model",
+        options,
+        index=index,
+        placeholder="Choose a model…",
+    )
+    st.session_state.selected_model = choice  # remember manual selections too
+
+    if st.button("Use custom model"):
+        use_custom_model_dialog()
 
 if choice is None:
     st.info("Pick a model to get started.")
@@ -161,10 +169,10 @@ source = registry[choice]
 try:
     load_model(source["kind"], source["ref"])
 except Exception as exc:  # broad on purpose: show a friendly message, not a traceback
-    st.error(f"Couldn't load **{choice}**: {exc}")
+    st.sidebar.error(f"Couldn't load **{choice}**: {exc}")
     st.stop()
 
-st.success(f"Loaded **{choice}**.")
+st.sidebar.success(f"Loaded **{choice}**.")
 
 # --- Run a simulation ---------------------------------------------------------
 # Inputs are an editable table: every input starts as "Single" at its model
@@ -226,35 +234,38 @@ else:
 # runs from 0, so a later start keeps the model's history (and its events) intact
 # and simply focuses every recorded point on the stretch you care about. See
 # simulations.make_timepoints.
-col_start, col_end, col_points = st.columns(3)
-start_time = col_start.number_input(
-    "Start time",
-    min_value=0.0,
-    value=0.0,
-    step=100.0,
-    help=(
-        "When to start recording. The model always runs from 0, so raising this "
-        "skips nothing — it just puts your points where the action is."
-    ),
-)
-end_time = col_end.number_input(
-    "End time",
-    min_value=0.0,
-    value=1000.0,
-    step=100.0,
-    help="When to stop, in the model's own time units.",
-)
-n_points = col_points.number_input(
-    "Number of points",
-    min_value=2,
-    value=300,
-    step=50,
-    help="How many timepoints to record across the window.",
-)
+with st.sidebar:
+    st.subheader("Time window")
+    start_time = st.number_input(
+        "Start time",
+        min_value=0.0,
+        value=0.0,
+        step=100.0,
+        help=(
+            "When to start recording. The model always runs from 0, so raising this "
+            "skips nothing — it just puts your points where the action is."
+        ),
+    )
+    end_time = st.number_input(
+        "End time",
+        min_value=0.0,
+        value=1000.0,
+        step=100.0,
+        help="When to stop, in the model's own time units.",
+    )
+    n_points = st.number_input(
+        "Number of points",
+        min_value=2,
+        value=300,
+        step=50,
+        help="How many timepoints to record across the window.",
+    )
 
-time_error = "Start time must be less than End time." if start_time >= end_time else ""
-if time_error:
-    st.error(time_error)
+    time_error = (
+        "Start time must be less than End time." if start_time >= end_time else ""
+    )
+    if time_error:
+        st.error(time_error)
 
 # --- Events (read-only) -------------------------------------------------------
 # Placed here, next to the time window, because its whole job is to inform that
@@ -302,8 +313,11 @@ if model_events:
 # only stash the *request* in session_state; the actual results + their controls are
 # rendered below, outside the button block. run_cached makes the re-fetch free, so
 # changing a plot control re-renders WITHOUT re-simulating.
-if st.button(
-    "Run simulation", type="primary", disabled=bool(input_errors) or bool(time_error)
+if st.sidebar.button(
+    "Run simulation",
+    type="primary",
+    use_container_width=True,
+    disabled=bool(input_errors) or bool(time_error),
 ):
     st.session_state["last_run"] = {
         "kind": source["kind"],
