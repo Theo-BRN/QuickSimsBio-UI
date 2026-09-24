@@ -44,49 +44,112 @@ SCALE_LOG = "Log"
 INPUT_SCALES = [SCALE_LINEAR, SCALE_LOG]
 
 
-# --- Model-state helpers ------------------------------------------------------
-def _snapshot_initial_state(model) -> tuple[dict, dict]:
-    """Capture a model's initial species concentrations and parameter values.
+# --- Inputs: what a model exposes ---------------------------------------------
+KIND_PARAMETER = "parameter"
+KIND_SPECIES = "species"
 
-    Returned as two ``{name: value}`` dicts. Used both to read input defaults
-    (see ``get_inputs``) and to restore the model after a run (see ``run``).
-    ``get_parameters`` returns ``None`` for a model with no global quantities
-    (e.g. brusselator), which we treat as "nothing to snapshot".
+
+def _input_parameter_set(model) -> dict:
+    """Snapshot a model's inputs through a temporary COPASI parameter set.
+
+    This is how ``qsb.get_model_inputs`` finds a model's inputs, and we mirror it
+    on purpose: a parameter set records every input under the same unique name the
+    package uses — including compartment-qualified species such as
+    ``Calcium{compartment[0]}``, which basico's plainer ``get_species`` reduces to
+    just ``Calcium`` — together with its kind and initial value.
+
+    Known package limitation (2026-09): ``run_simulations`` does not yet recognise
+    those compartment-qualified species names, so it ignores them (printing "not
+    recognised") and changes to them have no effect on the run.
+
+    The temporary set is removed in ``finally``: the loaded model is cached and
+    shared across sessions, so it must be left exactly as we found it.
     """
-    species = bsc.get_species(model=model)
-    params = bsc.get_parameters(model=model)
-    species_state = (
-        {} if species is None else species["initial_concentration"].to_dict()
-    )
-    param_state = {} if params is None else params["initial_value"].to_dict()
-    return species_state, param_state
+    name = "quicksimsbio-ui temporary"
+    existing = {p["name"] for p in bsc.get_parameter_sets(model=model)}
+    while name in existing:
+        name += " copy"
+    bsc.add_parameter_set(name, model=model)
+    try:
+        return bsc.get_parameter_sets(name, exact=True, model=model)[0]
+    finally:
+        bsc.remove_parameter_sets(name, exact=True, model=model)
 
 
-def _restore_initial_state(model, snapshot: tuple[dict, dict]) -> None:
-    """Write a snapshot from ``_snapshot_initial_state`` back onto the model."""
-    species_state, param_state = snapshot
-    for name, value in species_state.items():
-        bsc.set_species(name=name, initial_concentration=value, model=model)
-    for name, value in param_state.items():
-        bsc.set_parameters(name=name, initial_value=value, model=model)
+def _read_inputs(model) -> dict[str, tuple[str, float]]:
+    """``{name: (kind, default)}`` for every model input, in the package's order.
+
+    Same selection as ``qsb.get_model_inputs``: fixed global quantities first (an
+    assignment or ODE quantity depends on others, so it can't be set), then every
+    species at its initial concentration.
+    """
+    param_set = _input_parameter_set(model)
+    inputs = {
+        str(name): (KIND_PARAMETER, float(info["value"]))
+        for name, info in param_set["Initial Global Quantities"].items()
+        if info["simulation_type"] == "fixed"
+    }
+    for name, info in param_set["Initial Species Values"].items():
+        inputs[str(name)] = (KIND_SPECIES, float(info["concentration"]))
+    return inputs
 
 
-# --- Inputs: defaults → table → scan_dict -------------------------------------
 def get_inputs(model) -> dict[str, float]:
-    """Return each model input mapped to its current default value.
+    """Return each model input mapped to its default value.
 
-    The package lists the model's fixed global quantities and initial species as
-    inputs; we look up each one's default from basico (the same initial-value
-    fields the snapshot/restore guard reads). The UI seeds its inputs table with
-    these defaults, so every input starts as a "Single" value at its default.
-
+    The UI seeds its inputs with these, so every input starts at its default.
     ``model`` is passed explicitly rather than relying on basico's "current
     model" so the inputs are never tied to whatever happens to be loaded globally.
     """
-    names = qsb.get_model_inputs(model=model)
-    species_state, param_state = _snapshot_initial_state(model)
-    defaults = {**species_state, **param_state}
-    return {name: float(defaults.get(name, np.nan)) for name in names}
+    return {name: default for name, (_kind, default) in _read_inputs(model).items()}
+
+
+def get_input_kinds(model) -> dict[str, str]:
+    """Return each model input mapped to its kind: ``"parameter"`` or ``"species"``.
+
+    The package computes this split internally but returns only the names; the UI
+    needs it to label inputs and to pick a newcomer's example of each kind.
+    """
+    return {name: kind for name, (kind, _default) in _read_inputs(model).items()}
+
+
+def example_inputs(
+    kinds: dict[str, str], show_all_up_to: int = 5, per_kind: int = 3
+) -> list[str]:
+    """The inputs to pre-select as a newcomer's example, in the model's own order.
+
+    A small model (at most ``show_all_up_to`` inputs) shows every input. A larger
+    one shows the first ``per_kind`` of each kind, so the example teaches that
+    both parameters and species can be changed.
+    """
+    if len(kinds) <= show_all_up_to:
+        return list(kinds)
+    chosen = []
+    taken_per_kind: dict[str, int] = {}
+    for name, kind in kinds.items():
+        if taken_per_kind.get(kind, 0) < per_kind:
+            chosen.append(name)
+            taken_per_kind[kind] = taken_per_kind.get(kind, 0) + 1
+    return chosen
+
+
+# --- Inputs: time course (values → scan_dict) ---------------------------------
+def build_scan_dict_from_values(
+    defaults: dict[str, float], changed: dict[str, float]
+) -> dict[str, list[float]]:
+    """A single-run ``scan_dict``: changed inputs at their new value, the rest at default.
+
+    Every input becomes a one-point list — exactly what an all-``Single`` inputs
+    table produces — so the run and plot code downstream sees the shape it always
+    has. ``changed`` holds only the inputs the user chose to change; any name in
+    it that isn't a model input is ignored.
+    """
+    return {
+        name: [float(changed.get(name, default))] for name, default in defaults.items()
+    }
+
+
+# --- Inputs: general table (defaults → table → scan_dict) ---------------------
 
 
 def default_input_table(defaults: dict[str, float]) -> pd.DataFrame:
@@ -208,6 +271,23 @@ def make_timepoints(start: float, end: float, n_points: int) -> list[float]:
     return np.linspace(start, end, n_points).tolist()
 
 
+def _restore_inputs(model, snapshot: dict[str, tuple[str, float]]) -> None:
+    """Write a ``_read_inputs`` snapshot back onto the model, one input at a time.
+
+    Each value goes back under its exact, compartment-qualified name
+    (``exact=True``), so ``Calcium{compartment[3]}`` gets its own value back.
+    Keying by basico's plain names instead collapsed every ``Calcium`` into one
+    value and wrote it to all of them — erasing ``array_1d``'s calcium pulse.
+    """
+    for name, (kind, value) in snapshot.items():
+        if kind == KIND_SPECIES:
+            bsc.set_species(
+                name=name, exact=True, initial_concentration=value, model=model
+            )
+        else:
+            bsc.set_parameters(name=name, exact=True, initial_value=value, model=model)
+
+
 def run(model, scan_dict: dict, timepoints: list[float] | None = None):
     """Run time-course simulations for ``scan_dict``; return ``(wide, long)`` frames.
 
@@ -231,15 +311,17 @@ def run(model, scan_dict: dict, timepoints: list[float] | None = None):
     new *initial* value on the model and never puts it back. Because the app
     reuses one cached COPASI handle across runs, a scan would otherwise leave the
     model dirty — so a later "held" input would silently use the last scanned
-    value instead of its true default. We snapshot the initial state and restore
-    it in a ``finally`` so every run leaves the model exactly as it found it,
-    keeping held-at-default results history-independent.
+    value instead of its true default. We snapshot every input's initial value
+    (by its exact name — see ``_restore_inputs``) and restore it in a ``finally``,
+    so every run leaves the model exactly as it found it, keeping held-at-default
+    results history-independent. Only inputs are snapshotted, because inputs are
+    all ``run_simulations`` can set.
     """
-    snapshot = _snapshot_initial_state(model)
+    snapshot = _read_inputs(model)
     try:
         wide, long = qsb.run_simulations(
             scan_dict, timepoints=timepoints, format_output="both", model=model
         )
         return wide, long
     finally:
-        _restore_initial_state(model, snapshot)
+        _restore_inputs(model, snapshot)

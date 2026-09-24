@@ -7,6 +7,8 @@ that ``run`` forwards its args and restores model state. One real-model test at
 the end is the regression guard for the shared-model state leak.
 """
 
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -14,25 +16,15 @@ import pytest
 import simulations
 
 
-def _species_df(values: dict) -> pd.DataFrame:
-    """A stand-in for ``bsc.get_species`` output: index=name, initial_concentration col."""
-    return pd.DataFrame({"initial_concentration": pd.Series(values)})
-
-
-def _params_df(values: dict | None):
-    """A stand-in for ``bsc.get_parameters`` (None when a model has no parameters)."""
-    return None if values is None else pd.DataFrame({"initial_value": pd.Series(values)})
-
-
 @pytest.fixture
-def stub_model_state(monkeypatch):
-    """Stub basico's get/set initial-state calls and record every restore write.
+def stub_model_state(monkeypatch, stub_parameter_sets):
+    """Stub reading a model's inputs and record every restore write.
 
-    Lets the hermetic ``get_inputs`` / ``run`` tests work without a real COPASI
-    model. Returns the list that restore writes are appended to.
+    Reading goes through ``stub_parameter_sets`` (parameter ``k`` = 2.0, species
+    ``X`` = 3.0, plus a non-input assignment quantity), so the hermetic ``run``
+    tests work without a real COPASI model. Returns the list that restore writes
+    are appended to.
     """
-    monkeypatch.setattr(simulations.bsc, "get_species", lambda model=None: _species_df({"X": 3.0}))
-    monkeypatch.setattr(simulations.bsc, "get_parameters", lambda model=None: _params_df({"k": 2.0}))
     restored: list[tuple[str, dict]] = []
     monkeypatch.setattr(simulations.bsc, "set_species", lambda **kw: restored.append(("species", kw)))
     monkeypatch.setattr(simulations.bsc, "set_parameters", lambda **kw: restored.append(("params", kw)))
@@ -57,13 +49,108 @@ def _table(*rows) -> pd.DataFrame:
     return pd.DataFrame(list(rows), columns=simulations.INPUT_COLUMNS)
 
 
-# --- get_inputs ---------------------------------------------------------------
-def test_get_inputs_maps_each_input_to_its_default(monkeypatch, stub_model_state):
+# --- reading a model's inputs -------------------------------------------------
+_FAKE_PARAMETER_SET = {
+    "Initial Global Quantities": {
+        "k": {"value": 2.0, "simulation_type": "fixed"},
+        "k_assigned": {"value": 9.0, "simulation_type": "assignment"},  # not an input
+    },
+    "Initial Species Values": {"X": {"concentration": 3.0}},
+}
+
+
+@pytest.fixture
+def stub_parameter_sets(monkeypatch):
+    """Stub basico's parameter-set calls with one fake set; record add/remove.
+
+    ``get_parameter_sets(model=…)`` lists existing sets (none here); called with a
+    name it returns the freshly "added" set.
+    """
+    calls: list[tuple[str, str]] = []
+
+    def get_parameter_sets(name=None, exact=False, model=None):
+        return [] if name is None else [_FAKE_PARAMETER_SET]
+
+    monkeypatch.setattr(simulations.bsc, "get_parameter_sets", get_parameter_sets)
     monkeypatch.setattr(
-        simulations.qsb, "get_model_inputs", lambda model=None: {"X": None, "k": None}
+        simulations.bsc, "add_parameter_set", lambda name, model=None: calls.append(("add", name))
     )
-    # stub_model_state supplies species {"X": 3.0} and parameters {"k": 2.0}.
-    assert simulations.get_inputs("MODEL") == {"X": 3.0, "k": 2.0}
+    monkeypatch.setattr(
+        simulations.bsc,
+        "remove_parameter_sets",
+        lambda name, exact=False, model=None: calls.append(("remove", name)),
+    )
+    return calls
+
+
+def test_get_inputs_lists_fixed_parameters_then_species_at_their_defaults(
+    stub_parameter_sets,
+):
+    inputs = simulations.get_inputs("MODEL")
+
+    assert inputs == {"k": 2.0, "X": 3.0}  # the assignment quantity is not an input
+    assert list(inputs) == ["k", "X"]  # the package's order: parameters, then species
+
+
+def test_get_input_kinds_labels_each_input(stub_parameter_sets):
+    assert simulations.get_input_kinds("MODEL") == {
+        "k": simulations.KIND_PARAMETER,
+        "X": simulations.KIND_SPECIES,
+    }
+
+
+def test_reading_inputs_removes_its_temporary_parameter_set(stub_parameter_sets):
+    simulations.get_inputs("MODEL")
+
+    (add, name), (remove, same_name) = stub_parameter_sets
+    assert (add, remove) == ("add", "remove") and name == same_name
+
+
+def test_reading_inputs_removes_the_temporary_set_even_when_reading_fails(
+    monkeypatch, stub_parameter_sets
+):
+    def broken_read(name=None, exact=False, model=None):
+        if name is None:
+            return []
+        raise RuntimeError("COPASI hiccup")
+
+    monkeypatch.setattr(simulations.bsc, "get_parameter_sets", broken_read)
+
+    with pytest.raises(RuntimeError):
+        simulations.get_inputs("MODEL")
+    assert [call for call, _ in stub_parameter_sets] == ["add", "remove"]
+
+
+# --- example_inputs -----------------------------------------------------------
+_P, _S = simulations.KIND_PARAMETER, simulations.KIND_SPECIES
+
+
+def test_example_inputs_shows_every_input_of_a_small_model():
+    kinds = {"k1": _P, "A": _S, "B": _S}
+    assert simulations.example_inputs(kinds) == ["k1", "A", "B"]
+
+
+def test_example_inputs_shows_the_first_few_of_each_kind_in_model_order():
+    kinds = {f"k{i}": _P for i in range(5)} | {f"S{i}": _S for i in range(5)}
+    assert simulations.example_inputs(kinds) == ["k0", "k1", "k2", "S0", "S1", "S2"]
+
+
+def test_example_inputs_of_a_large_single_kind_model_shows_just_the_first_few():
+    kinds = {f"S{i}": _S for i in range(10)}
+    assert simulations.example_inputs(kinds) == ["S0", "S1", "S2"]
+
+
+# --- build_scan_dict_from_values ----------------------------------------------
+def test_build_scan_dict_from_values_holds_unchanged_inputs_at_default():
+    defaults = {"k": 2.0, "X": 3.0, "Y": 4.0}
+    scan_dict = simulations.build_scan_dict_from_values(defaults, {"X": 0.5})
+
+    assert scan_dict == {"k": [2.0], "X": [0.5], "Y": [4.0]}
+
+
+def test_build_scan_dict_from_values_ignores_names_that_are_not_inputs():
+    scan_dict = simulations.build_scan_dict_from_values({"X": 3.0}, {"nope": 1.0})
+    assert scan_dict == {"X": [3.0]}
 
 
 # --- default_input_table ------------------------------------------------------
@@ -217,9 +304,12 @@ def test_run_restores_initial_state_after_running(monkeypatch, stub_model_state)
     monkeypatch.setattr(simulations.qsb, "run_simulations", lambda *a, **k: ["wide", "long"])
     simulations.run("MODEL", {"X": [0.1, 1, 10]})
 
-    # The snapshot ({"X": 3.0} species, {"k": 2.0} param) is written back verbatim.
-    assert ("species", {"name": "X", "initial_concentration": 3.0, "model": "MODEL"}) in stub_model_state
-    assert ("params", {"name": "k", "initial_value": 2.0, "model": "MODEL"}) in stub_model_state
+    # Every input's snapshot value is written back under its EXACT name — and only
+    # inputs: the non-input assignment quantity is never touched.
+    assert stub_model_state == [
+        ("params", {"name": "k", "exact": True, "initial_value": 2.0, "model": "MODEL"}),
+        ("species", {"name": "X", "exact": True, "initial_concentration": 3.0, "model": "MODEL"}),
+    ]
 
 
 def test_run_restores_initial_state_even_when_the_run_raises(monkeypatch, stub_model_state):
@@ -247,3 +337,59 @@ def test_run_restores_model_state_so_held_inputs_stay_at_default():
     after_wide, _ = simulations.run(model, {}, timepoints)
 
     pd.testing.assert_frame_equal(pristine_wide, after_wide)
+
+
+# --- reading inputs from real models (no stubs) --------------------------------
+# brusselator: species only · turing_base: parameters + species · array_1d: the
+# same species in many compartments ("Calcium{compartment[0]}", …) — the case
+# where basico's plain get_species names are wrong and every default went NaN.
+def _example_model(stem: str):
+    path = next(p for p in simulations.bsc.get_examples() if Path(p).stem == stem)
+    return simulations.bsc.load_model(path)
+
+
+@pytest.mark.parametrize("stem", ["brusselator", "turing_base", "array_1d"])
+def test_real_model_inputs_match_the_package_and_all_have_defaults(stem):
+    model = _example_model(stem)
+    inputs = simulations.get_inputs(model)
+
+    # Our copy of the package's input logic must agree with it exactly — names
+    # AND order — so the app and the package always mean the same inputs.
+    assert list(inputs) == list(simulations.qsb.get_model_inputs(model=model))
+    assert not any(np.isnan(value) for value in inputs.values())
+    assert list(simulations.get_input_kinds(model)) == list(inputs)
+
+
+def test_real_model_reading_inputs_leaves_no_parameter_set_behind():
+    model = _example_model("turing_base")
+    before = [p["name"] for p in simulations.bsc.get_parameter_sets(model=model)]
+
+    simulations.get_inputs(model)
+    simulations.get_input_kinds(model)
+
+    assert [p["name"] for p in simulations.bsc.get_parameter_sets(model=model)] == before
+
+
+def test_real_model_kinds_label_parameters_and_species():
+    kinds = simulations.get_input_kinds(_example_model("turing_base"))
+
+    assert kinds["v1"] == simulations.KIND_PARAMETER
+    assert kinds["S1"] == simulations.KIND_SPECIES
+
+
+def test_run_leaves_every_multi_compartment_default_unchanged():
+    # Regression guard for the multi-compartment leak. All 20 of array_1d's
+    # compartments hold a species basico calls plain "Calcium"; a restore keyed by
+    # those names kept ONE value and wrote it to all of them, flattening the 0.2
+    # pulse in compartment 3 on every run — even a plain default one.
+    model = _example_model("array_1d")
+    before = simulations.get_inputs(model)
+    assert before["Calcium{compartment[3]}"] == pytest.approx(0.2)  # the pulse
+    timepoints = simulations.make_timepoints(0, 10, 5)
+
+    # (The package currently ignores compartment-qualified species in a scan, so
+    # this exercises the restore guard, not the scan itself.)
+    simulations.run(model, {}, timepoints)  # a plain default run
+    simulations.run(model, {"Calcium{compartment[3]}": [5.0, 50.0]}, timepoints)  # a scan
+
+    assert simulations.get_inputs(model) == pytest.approx(before)
