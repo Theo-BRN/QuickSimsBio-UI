@@ -112,10 +112,30 @@ def test_app_shows_one_tab_per_analysis_mode():
     ]
 
 
-def test_app_keeps_placeholder_tabs_filled_when_a_run_fails():
-    # Time course calls st.stop() on a failed run, which halts the script there.
-    # The other tabs are filled *before* it in main.py so that can't blank them;
-    # this pins that ordering, since nothing else would notice it breaking.
+def test_app_puts_run_and_time_window_in_the_time_course_tab_not_the_sidebar():
+    # Each tab gets its own Run, beside the inputs it runs, so Run must never need
+    # to know which tab is active. The sidebar is for choosing a model only.
+    at = AppTest.from_file("app/main.py")
+    at.session_state["selected_model"] = "brusselator"
+    at.run()
+    assert not at.exception
+
+    time_course = at.tabs[0]
+    assert "Run simulation" in [b.label for b in time_course.button]
+    assert {"Start time", "End time", "Number of points"} <= {
+        n.label for n in time_course.number_input
+    }
+    sidebar_buttons = [b.label for b in at.sidebar.button]
+    assert "Use custom model" in sidebar_buttons  # proves the sidebar query sees things
+    assert "Run simulation" not in sidebar_buttons
+    assert list(at.sidebar.number_input) == []
+
+
+def test_app_a_failed_run_in_one_tab_leaves_every_other_tab_intact():
+    # A failed run must end only its own tab's results panel. st.stop() would
+    # halt the whole script and blank every tab drawn after it — nothing visible
+    # would flag that, so this pins it. Time course (first tab) fails; the tabs
+    # after it must still be fully drawn.
     st.cache_data.clear()
     at = AppTest.from_file("app/main.py")
     at.session_state["selected_model"] = "brusselator"
@@ -125,8 +145,27 @@ def test_app_keeps_placeholder_tabs_filled_when_a_run_fails():
         next(b for b in at.button if b.label == "Run simulation").click().run()
 
     assert not at.exception
-    for placeholder_tab in at.tabs[1:]:
+    for placeholder_tab in at.tabs[1:3]:
         assert any("coming soon" in c.value.lower() for c in placeholder_tab.caption)
+    vary_multiple = at.tabs[3]
+    assert "Run simulation" in [b.label for b in vary_multiple.button]
+
+
+def test_app_keeps_each_tabs_results_to_itself():
+    # Each tab stores its own run request, so a run in Time course must not show
+    # up as results in Vary multiple inputs.
+    at = AppTest.from_file("app/main.py")
+    at.session_state["selected_model"] = "brusselator"
+    at.run()
+
+    _number_input(at, "Number of points").set_value(20).run()  # Time course's
+    next(b for b in at.button if b.label == "Run simulation").click().run(timeout=60)
+
+    assert not at.exception
+    time_course, vary_multiple = at.tabs[0], at.tabs[3]
+    assert len(time_course.get("plotly_chart")) == 1
+    assert len(vary_multiple.get("plotly_chart")) == 0
+    assert any("will appear here" in c.value for c in vary_multiple.caption)
 
 
 def test_app_keeps_the_raw_table_when_plotting_fails():
@@ -178,10 +217,14 @@ def test_app_clears_the_miss_warning_once_the_window_reaches_the_event():
 
     with mock.patch("events.read_events", return_value=[_late_event()]):
         at.run()
-        _number_input(at, "End time").set_value(2_000_000.0).run()
+        _number_input(at, "End time").set_value(2_000_000.0).run()  # Time course's
 
     assert not at.exception
-    assert not any("add drug" in w.value for w in at.warning)
+    time_course, vary_multiple = at.tabs[0], at.tabs[3]
+    assert not any("add drug" in w.value for w in time_course.warning)
+    # Each tab's time window is its own: Vary multiple still ends at 1000, so it
+    # still (correctly) warns.
+    assert any("add drug" in w.value for w in vary_multiple.warning)
 
 
 def test_app_shows_no_events_section_for_a_model_without_events():

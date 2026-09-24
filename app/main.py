@@ -127,19 +127,316 @@ def use_custom_model_dialog():
         st.rerun()
 
 
+# --- Tab building blocks ------------------------------------------------------
+# Every tab's code runs on every rerun — hidden tabs included — so anything drawn
+# in more than one tab needs a key unique to that tab, or Streamlit raises a
+# duplicate-ID error. Each helper takes the tab's short name and prefixes its keys
+# with it ("time_course::end", "vary_multiple::end", …). The *code* is shared;
+# each tab's *values* are its own.
+
+
+def render_time_window(tab: str):
+    """Start / end / number-of-points controls. Returns (start, end, n, error).
+
+    Start/end bound the window we *record*, not what COPASI integrates — it
+    always runs from 0, so a later start keeps the model's history (and its
+    events) intact and simply focuses every recorded point on the stretch you
+    care about. See simulations.make_timepoints.
+
+    Shared by the tabs that record a time course today. Scan tabs are expected to
+    get their own controls (e.g. "measure at time t") rather than options here.
+    """
+    st.markdown("**Time window**")
+    col_start, col_end, col_points = st.columns(3)
+    start = col_start.number_input(
+        "Start time",
+        min_value=0.0,
+        value=0.0,
+        step=100.0,
+        key=f"{tab}::start",
+        help=(
+            "When to start recording. The model always runs from 0, so raising "
+            "this skips nothing — it just puts your points where the action is."
+        ),
+    )
+    end = col_end.number_input(
+        "End time",
+        min_value=0.0,
+        value=1000.0,
+        step=100.0,
+        key=f"{tab}::end",
+        help="When to stop, in the model's own time units.",
+    )
+    n_points = col_points.number_input(
+        "Number of points",
+        min_value=2,
+        value=300,
+        step=50,
+        key=f"{tab}::n_points",
+        help="How many timepoints to record across the window.",
+    )
+
+    error = "Start time must be less than End time." if start >= end else ""
+    if error:
+        st.error(error)
+    return start, end, n_points, error
+
+
+def render_events_panel(tab: str, source: dict, end_time: float):
+    """The model's events (read-only), beside the time window they inform.
+
+    Its whole job is to inform the time-window choice: many models only *do*
+    anything after an event that fires far later than the default window reaches.
+    Read-only — we surface events, never edit them (see CLAUDE.md > Events).
+    Wrapped broadly on purpose: an uncaught error reading a model's events would
+    blank the Run button and results below it. A cosmetic panel must never do
+    that, so on failure we simply show nothing.
+    """
+    try:
+        model_events, time_unit = get_events_cached(source["kind"], source["ref"])
+    except Exception:  # broad on purpose: a missing panel beats a broken page
+        return
+    if not model_events:
+        return
+
+    # The sharp edge this feature exists to catch: a run that stops before its
+    # events ever fire (e.g. CTCA's events at ~1e6 vs the default end of 1000).
+    # Directly under End time, where you'd act on it.
+    missed = events.missed_events(model_events, end_time)
+    if missed:
+        plural = len(missed) > 1
+        names = ", ".join(event.name for event in missed)
+        st.warning(
+            f"Your run will not include the event{'s' if plural else ''} {names}."
+        )
+
+    with st.expander("Events in this model", expanded=False, key=f"{tab}::events"):
+        st.dataframe(
+            events.events_table(model_events),
+            hide_index=True,
+            width="stretch",
+            key=f"{tab}::events_table",
+        )
+        timeline = events.segments(model_events)
+        if timeline:
+            st.plotly_chart(
+                events.timeline_figure(timeline, end=end_time, unit=time_unit),
+                width="stretch",
+                key=f"{tab}::events_timeline",
+            )
+        else:
+            st.caption(
+                "These events are state-based — when they fire depends on the "
+                "simulation, so they can't be placed on a timeline in advance."
+            )
+
+
+def render_results(tab: str, source: dict):
+    """This tab's latest results, from the run request the tab stored.
+
+    Each tab keeps its own request under ``last_run::<tab>``, so running a scan
+    in one tab never shows up in another. Only a result for the currently
+    selected model is shown — switching models leaves the old request behind,
+    but it isn't this model's.
+    """
+    last_run = st.session_state.get(f"last_run::{tab}")
+    if not last_run or (last_run["kind"], last_run["ref"]) != (
+        source["kind"],
+        source["ref"],
+    ):
+        st.caption("Your results will appear here once you run a simulation.")
+        return
+
+    # Some models / parameter combos fail inside COPASI, and the long-format path
+    # can throw for others. Non-technical users can't read a traceback, so we
+    # degrade gracefully: a failed *run* shows a friendly message; a failed *plot*
+    # still keeps the raw data (shown below) so nothing is lost.
+    try:
+        wide, long = run_cached(
+            last_run["kind"],
+            last_run["ref"],
+            last_run["scan_dict"],
+            last_run["timepoints"],
+        )
+    except Exception as exc:  # broad on purpose: a message, not a traceback
+        st.error(
+            "This model couldn't complete the simulation for those settings. "
+            "Try different inputs, or another model."
+        )
+        with st.expander("What went wrong?", key=f"{tab}::run_error"):
+            st.write(str(exc))
+        # `return`, not st.stop(): st.stop() halts the WHOLE script, which would
+        # blank every tab drawn after this one. return only ends this tab's panel.
+        return
+
+    # The plot morphs to how many inputs were scanned (see plotting.mode):
+    # 0 varying -> kinetics vs time, 1 -> output vs that input, 2+ -> scatter.
+    varying = plotting.varying_inputs(last_run["scan_dict"])
+    mode = plotting.mode(last_run["scan_dict"])
+    try:
+        if mode in (plotting.MODE_KINETICS, plotting.MODE_VS_INPUT):
+            plot_type = st.radio(
+                "Plot type",
+                plotting.PLOT_TYPES,
+                horizontal=True,
+                key=f"{tab}::plot_type",
+            )
+            if mode == plotting.MODE_KINETICS:
+                fig = plotting.kinetics_figure(long, plot_type=plot_type)
+            else:
+                fig = plotting.vs_input_figure(
+                    long,
+                    last_run["scan_dict"],
+                    last_run["scales"],
+                    plot_type=plot_type,
+                )
+            st.plotly_chart(fig, width="stretch", key=f"{tab}::plot")
+        else:
+            # 2+ scanned inputs: a scatter of one output (colour, or z+colour in
+            # 3-D) over two chosen inputs. These pickers live outside the Run
+            # block, so changing them re-renders from the cached result without
+            # re-simulating.
+            outputs = sorted(long[plotting.COL_OUTPUT_TYPE].unique())
+            col_out, col_x, col_y = st.columns(3)
+            output_type = col_out.selectbox(
+                "Output", outputs, key=f"{tab}::scatter_output"
+            )
+            x_input = col_x.selectbox(
+                "X axis", varying, index=0, key=f"{tab}::scatter_x"
+            )
+            y_input = col_y.selectbox(
+                "Y axis", varying, index=1, key=f"{tab}::scatter_y"
+            )
+            three_d = st.toggle("3-D view", key=f"{tab}::scatter_3d")
+            st.plotly_chart(
+                plotting.scatter_figure(
+                    long,
+                    last_run["scan_dict"],
+                    last_run["scales"],
+                    x_input,
+                    y_input,
+                    output_type,
+                    three_d=three_d,
+                ),
+                width="stretch",
+                key=f"{tab}::plot",
+            )
+    except Exception as exc:  # broad on purpose: keep the data, explain the plot
+        st.warning(
+            "Couldn't draw a plot for this result — here's the raw data instead."
+        )
+        with st.expander("What went wrong?", key=f"{tab}::plot_error"):
+            st.write(str(exc))
+
+    with st.expander("Raw results table", key=f"{tab}::raw"):
+        st.dataframe(wide, width="stretch", key=f"{tab}::raw_results")
+
+
+def render_table_mode(tab: str, source: dict):
+    """A whole tab driven by the general inputs table: Inputs | Outputs.
+
+    Inputs are an editable table: every input starts as "Single" at its model
+    default, and the Type column decides what each row means. All the
+    parsing/validation lives in simulations.py so it stays testable. The editor's
+    key includes the tab and the model, so switching models starts a fresh editor
+    and two tabs never share one.
+
+    Splitting into columns puts the plot beside the controls that shape it.
+    """
+    col_inputs, col_outputs = st.columns(2, gap="large")
+
+    with col_inputs:
+        st.subheader("Inputs")
+        default_table = simulations.default_input_table(
+            get_inputs_cached(source["kind"], source["ref"])
+        )
+        edited = st.data_editor(
+            default_table,
+            key=f"input_editor::{tab}::{source['kind']}::{source['ref']}",
+            hide_index=True,
+            width="stretch",
+            column_config={
+                simulations.COL_PARAM: st.column_config.TextColumn(
+                    "Input", disabled=True
+                ),
+                simulations.COL_VALUE: st.column_config.NumberColumn(
+                    "Value", help="Used when Type is Single."
+                ),
+                simulations.COL_LOWER: st.column_config.NumberColumn(
+                    "Lower", help="Grid lower bound."
+                ),
+                simulations.COL_UPPER: st.column_config.NumberColumn(
+                    "Upper", help="Grid upper bound."
+                ),
+                simulations.COL_TYPE: st.column_config.SelectboxColumn(
+                    "Type",
+                    options=simulations.INPUT_TYPES,
+                    required=True,
+                    help="Single = fixed value · Grid = sweep Lower→Upper.",
+                ),
+                simulations.COL_SCALE: st.column_config.SelectboxColumn(
+                    "Scale",
+                    options=simulations.INPUT_SCALES,
+                    required=True,
+                    help="Linear or logarithmic spacing for a Grid scan.",
+                ),
+                simulations.COL_N: st.column_config.NumberColumn(
+                    "n", step=1, help="Number of grid points."
+                ),
+            },
+        )
+        scan_dict, input_errors = simulations.build_scan_dict_from_table(edited)
+
+        if input_errors:
+            for name, message in input_errors.items():
+                st.error(f"**{name}**: {message}")
+        else:
+            n_sims = prod(len(values) for values in scan_dict.values())
+            st.caption(
+                f"This will run {n_sims} simulation{'s' if n_sims != 1 else ''}."
+            )
+
+        start, end, n_points, time_error = render_time_window(tab)
+        render_events_panel(tab, source, end)
+
+        # Streamlit re-runs this whole script on *every* widget change. If we
+        # rendered results inside the `if clicked:` block, the plot would vanish
+        # the moment the user touched a plot control (that rerun has clicked ==
+        # False). So on click we only stash this tab's *request* in session_state;
+        # render_results draws from it on every rerun, and run_cached makes that
+        # free. The button sits beside the inputs it runs, so it never needs to
+        # know which tab is active.
+        if st.button(
+            "Run simulation",
+            type="primary",
+            width="stretch",
+            key=f"{tab}::run",
+            disabled=bool(input_errors) or bool(time_error),
+        ):
+            st.session_state[f"last_run::{tab}"] = {
+                "kind": source["kind"],
+                "ref": source["ref"],
+                "scan_dict": scan_dict,
+                "timepoints": simulations.make_timepoints(start, end, int(n_points)),
+                "scales": simulations.input_scales_from_table(edited),
+            }
+
+    with col_outputs:
+        st.subheader("Outputs")
+        render_results(tab, source)
+
+
+# --- Page ---------------------------------------------------------------------
 st.title("QuickSimsBio")
-st.caption("Run mechanistic model simulations — quickly.")
 
 # Built-in registry, plus any custom models added this session.
 st.session_state.setdefault("user_models", {})
 registry = models.merge_user_models(get_registry(), st.session_state.user_models)
 options = list(registry)
 
-# Setup lives in the sidebar: a familiar, always-visible home for "what am I
-# simulating?", leaving the whole content area for inputs and results. Sidebar
-# blocks write to the sidebar wherever they appear in the script, so the code can
-# stay in dependency order while the sidebar renders top-to-bottom in the order
-# these blocks run: model, then time, then events, then Run.
+# The sidebar is for choosing *what* to simulate — a familiar, always-visible
+# home that leaves the content area for inputs and results (snapshots will join
+# it later). Everything about *how* to run lives in the tabs.
 with st.sidebar:
     st.header("Setup")
 
@@ -174,267 +471,29 @@ except Exception as exc:  # broad on purpose: show a friendly message, not a tra
 
 st.sidebar.success(f"Loaded **{choice}**.")
 
-# Start/end bound the window we *record*, not what COPASI integrates — it always
-# runs from 0, so a later start keeps the model's history (and its events) intact
-# and simply focuses every recorded point on the stretch you care about. See
-# simulations.make_timepoints.
-with st.sidebar:
-    st.subheader("Time window")
-    start_time = st.number_input(
-        "Start time",
-        min_value=0.0,
-        value=0.0,
-        step=100.0,
-        help=(
-            "When to start recording. The model always runs from 0, so raising this "
-            "skips nothing — it just puts your points where the action is."
-        ),
-    )
-    end_time = st.number_input(
-        "End time",
-        min_value=0.0,
-        value=1000.0,
-        step=100.0,
-        help="When to stop, in the model's own time units.",
-    )
-    n_points = st.number_input(
-        "Number of points",
-        min_value=2,
-        value=300,
-        step=50,
-        help="How many timepoints to record across the window.",
-    )
-
-    time_error = (
-        "Start time must be less than End time." if start_time >= end_time else ""
-    )
-    if time_error:
-        st.error(time_error)
-
-# --- Events (read-only) -------------------------------------------------------
-# Placed here, next to the time window, because its whole job is to inform that
-# choice: many models only *do* anything after an event that fires far later than
-# the default window reaches. Read-only — we surface events, never edit them (see
-# CLAUDE.md > Events). Wrapped broadly on purpose: Streamlit runs this file top to
-# bottom, so an uncaught error reading a model's events would blank the Run button
-# and results below. A cosmetic, read-only panel must never do that, so on failure
-# we simply show nothing.
-try:
-    model_events, time_unit = get_events_cached(source["kind"], source["ref"])
-except Exception:  # broad on purpose: a missing panel beats a broken page
-    model_events, time_unit = [], ""
-
-if model_events:
-    with st.expander("Events in this model", expanded=False):
-        st.dataframe(
-            events.events_table(model_events),
-            hide_index=True,
-            use_container_width=True,
-        )
-        timeline = events.segments(model_events)
-        if timeline:
-            st.plotly_chart(
-                events.timeline_figure(timeline, end=end_time, unit=time_unit),
-                use_container_width=True,
-            )
-        else:
-            st.caption(
-                "These events are state-based — when they fire depends on the "
-                "simulation, so they can't be placed on a timeline in advance."
-            )
-
-    # The sharp edge this whole feature exists to catch: a run that stops before
-    # its events ever fire (e.g. CTCA's events at ~1e6 vs the default end of 1000).
-    missed = events.missed_events(model_events, end_time)
-    if missed:
-        plural = len(missed) > 1
-        names = ", ".join(event.name for event in missed)
-        st.warning(f"Your run will not include the event{'s' if plural else ''} {names}.")
-
 # --- Analysis tabs ------------------------------------------------------------
 # One tab per analysis mode, mirroring the 0-D / 1-D / 2-D / n-D structure that
-# plotting.mode already implements. Only Time course is wired up so far; the
-# other three are visible placeholders so the shape of the app is clear first.
+# plotting.mode already implements. Tab bodies never call st.stop() (see
+# render_results), so the order they are filled in doesn't matter.
 tab_time, tab_single, tab_two, tab_multi = st.tabs(
     ["Time course", "Vary single input", "Vary two inputs", "Vary multiple inputs"]
 )
 
-# Filled BEFORE Time course on purpose. A tab's position is fixed when st.tabs()
-# creates it, so fill order doesn't move them — but Time course calls st.stop() on
-# a failed run, which halts the script there. Filling these first means a failed
-# run can't leave them blank.
+with tab_time:
+    # Still the general table for now; step 2b gives Time course its own simpler
+    # chip-based inputs, leaving the table to "Vary multiple inputs".
+    render_table_mode("time_course", source)
+
 with tab_single:
     st.caption(
         "Coming soon — vary one input across a range and see how each output responds."
     )
+
 with tab_two:
     st.caption(
         "Coming soon — vary two inputs together and see how an output changes "
         "across both."
     )
+
 with tab_multi:
-    st.caption("Coming soon — explore many inputs at once.")
-
-with tab_time:
-    # Inputs are an editable table: every input starts as "Single" at its model
-    # default, and the Type column decides what each row means. main.py only
-    # renders widgets and wires them to the pure adapter functions in
-    # simulations.py; all the parsing/validation lives there so it stays testable.
-    # (This general table will move to "Vary multiple inputs" once Time course
-    # gets its own simpler widget — it can still set up scans from here for now.)
-    #
-    # A fresh editor per model (key includes kind/ref) so switching models doesn't
-    # carry edits across; the cached default table is the stable baseline and the
-    # editor's `key` persists the user's edits, so we read the *return* value.
-    default_table = simulations.default_input_table(
-        get_inputs_cached(source["kind"], source["ref"])
-    )
-    edited = st.data_editor(
-        default_table,
-        key=f"input_editor::{source['kind']}::{source['ref']}",
-        hide_index=True,
-        use_container_width=True,
-        column_config={
-            simulations.COL_PARAM: st.column_config.TextColumn(
-                "Input", disabled=True
-            ),
-            simulations.COL_VALUE: st.column_config.NumberColumn(
-                "Value", help="Used when Type is Single."
-            ),
-            simulations.COL_LOWER: st.column_config.NumberColumn(
-                "Lower", help="Grid lower bound."
-            ),
-            simulations.COL_UPPER: st.column_config.NumberColumn(
-                "Upper", help="Grid upper bound."
-            ),
-            simulations.COL_TYPE: st.column_config.SelectboxColumn(
-                "Type",
-                options=simulations.INPUT_TYPES,
-                required=True,
-                help="Single = fixed value · Grid = sweep Lower→Upper.",
-            ),
-            simulations.COL_SCALE: st.column_config.SelectboxColumn(
-                "Scale",
-                options=simulations.INPUT_SCALES,
-                required=True,
-                help="Linear or logarithmic spacing for a Grid scan.",
-            ),
-            simulations.COL_N: st.column_config.NumberColumn(
-                "n", step=1, help="Number of grid points."
-            ),
-        },
-    )
-    scan_dict, input_errors = simulations.build_scan_dict_from_table(edited)
-
-    if input_errors:
-        for name, message in input_errors.items():
-            st.error(f"**{name}**: {message}")
-    else:
-        n_sims = prod(len(values) for values in scan_dict.values())
-        st.caption(f"This will run {n_sims} simulation{'s' if n_sims != 1 else ''}.")
-
-    # Streamlit re-runs this whole script on *every* widget change. If we rendered
-    # the results inside the `if run_clicked:` block, the plot would vanish the
-    # moment the user touched a plot control (that rerun has run_clicked == False).
-    # So on click we only stash the *request* in session_state; the actual results
-    # + their controls are rendered below, outside the button block. run_cached
-    # makes the re-fetch free, so changing a plot control re-renders WITHOUT
-    # re-simulating. (st.sidebar.* always writes to the sidebar, even from inside
-    # a tab, so the button stays in the sidebar.)
-    if st.sidebar.button(
-        "Run simulation",
-        type="primary",
-        use_container_width=True,
-        disabled=bool(input_errors) or bool(time_error),
-    ):
-        st.session_state["last_run"] = {
-            "kind": source["kind"],
-            "ref": source["ref"],
-            "scan_dict": scan_dict,
-            "timepoints": simulations.make_timepoints(
-                start_time, end_time, int(n_points)
-            ),
-            "scales": simulations.input_scales_from_table(edited),
-        }
-
-    # --- Results (adaptive plot) ----------------------------------------------
-    # Only show a result for the model that's currently selected — switching
-    # models leaves the old run in session_state, but it isn't this model's.
-    last_run = st.session_state.get("last_run")
-    if last_run and (last_run["kind"], last_run["ref"]) == (
-        source["kind"],
-        source["ref"],
-    ):
-        # Some models / parameter combos fail inside COPASI, and the long-format
-        # path can throw for others. Non-technical users can't read a traceback, so
-        # we degrade gracefully: a failed *run* shows a friendly message and stops;
-        # a failed *plot* still keeps the raw data (shown below) so nothing is lost.
-        try:
-            wide, long = run_cached(
-                last_run["kind"],
-                last_run["ref"],
-                last_run["scan_dict"],
-                last_run["timepoints"],
-            )
-        except Exception as exc:  # broad on purpose: a message, not a traceback
-            st.error(
-                "This model couldn't complete the simulation for those settings. "
-                "Try different inputs, or another model."
-            )
-            with st.expander("What went wrong?"):
-                st.write(str(exc))
-            st.stop()
-
-        # The plot morphs to how many inputs were scanned (see plotting.mode):
-        # 0 varying -> kinetics vs time, 1 -> output vs that input, 2+ -> scatter.
-        varying = plotting.varying_inputs(last_run["scan_dict"])
-        mode = plotting.mode(last_run["scan_dict"])
-        try:
-            if mode in (plotting.MODE_KINETICS, plotting.MODE_VS_INPUT):
-                plot_type = st.radio(
-                    "Plot type", plotting.PLOT_TYPES, horizontal=True, key="plot_type"
-                )
-                if mode == plotting.MODE_KINETICS:
-                    fig = plotting.kinetics_figure(long, plot_type=plot_type)
-                else:
-                    fig = plotting.vs_input_figure(
-                        long,
-                        last_run["scan_dict"],
-                        last_run["scales"],
-                        plot_type=plot_type,
-                    )
-                st.plotly_chart(fig, use_container_width=True)
-            else:
-                # 2+ scanned inputs: a scatter of one output (colour, or z+colour
-                # in 3-D) over two chosen inputs. These pickers live outside the
-                # Run block, so changing them re-renders from the cached result
-                # without re-simulating.
-                outputs = sorted(long[plotting.COL_OUTPUT_TYPE].unique())
-                col_out, col_x, col_y = st.columns(3)
-                output_type = col_out.selectbox(
-                    "Output", outputs, key="scatter_output"
-                )
-                x_input = col_x.selectbox("X axis", varying, index=0, key="scatter_x")
-                y_input = col_y.selectbox("Y axis", varying, index=1, key="scatter_y")
-                three_d = st.toggle("3-D view", key="scatter_3d")
-                st.plotly_chart(
-                    plotting.scatter_figure(
-                        long,
-                        last_run["scan_dict"],
-                        last_run["scales"],
-                        x_input,
-                        y_input,
-                        output_type,
-                        three_d=three_d,
-                    ),
-                    use_container_width=True,
-                )
-        except Exception as exc:  # broad on purpose: keep the data, explain the plot
-            st.warning(
-                "Couldn't draw a plot for this result — here's the raw data instead."
-            )
-            with st.expander("What went wrong?"):
-                st.write(str(exc))
-
-        with st.expander("Raw results table"):
-            st.dataframe(wide, use_container_width=True)
+    render_table_mode("vary_multiple", source)
