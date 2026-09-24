@@ -98,6 +98,37 @@ def test_app_shows_a_friendly_error_when_a_run_fails():
     assert _result_tables(at) == []  # no data, so no results table
 
 
+def test_app_shows_one_tab_per_analysis_mode():
+    at = AppTest.from_file("app/main.py")
+    at.session_state["selected_model"] = "brusselator"
+    at.run()
+    assert not at.exception
+
+    assert [tab.label for tab in at.tabs] == [
+        "Time course",
+        "Vary single input",
+        "Vary two inputs",
+        "Vary multiple inputs",
+    ]
+
+
+def test_app_keeps_placeholder_tabs_filled_when_a_run_fails():
+    # Time course calls st.stop() on a failed run, which halts the script there.
+    # The other tabs are filled *before* it in main.py so that can't blank them;
+    # this pins that ordering, since nothing else would notice it breaking.
+    st.cache_data.clear()
+    at = AppTest.from_file("app/main.py")
+    at.session_state["selected_model"] = "brusselator"
+    at.run()
+
+    with mock.patch("simulations.run", side_effect=RuntimeError("boom")):
+        next(b for b in at.button if b.label == "Run simulation").click().run()
+
+    assert not at.exception
+    for placeholder_tab in at.tabs[1:]:
+        assert any("coming soon" in c.value.lower() for c in placeholder_tab.caption)
+
+
 def test_app_keeps_the_raw_table_when_plotting_fails():
     # If the run succeeds but the figure builder throws, we keep the raw data and
     # warn — rather than blanking the view. Force it by patching kinetics_figure
