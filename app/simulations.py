@@ -58,10 +58,6 @@ def _input_parameter_set(model) -> dict:
     ``Calcium{compartment[0]}``, which basico's plainer ``get_species`` reduces to
     just ``Calcium`` — together with its kind and initial value.
 
-    Known package limitation (2026-09): ``run_simulations`` does not yet recognise
-    those compartment-qualified species names, so it ignores them (printing "not
-    recognised") and changes to them have no effect on the run.
-
     The temporary set is removed in ``finally``: the loaded model is cached and
     shared across sessions, so it must be left exactly as we found it.
     """

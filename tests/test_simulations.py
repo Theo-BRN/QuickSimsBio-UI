@@ -387,9 +387,22 @@ def test_run_leaves_every_multi_compartment_default_unchanged():
     assert before["Calcium{compartment[3]}"] == pytest.approx(0.2)  # the pulse
     timepoints = simulations.make_timepoints(0, 10, 5)
 
-    # (The package currently ignores compartment-qualified species in a scan, so
-    # this exercises the restore guard, not the scan itself.)
     simulations.run(model, {}, timepoints)  # a plain default run
     simulations.run(model, {"Calcium{compartment[3]}": [5.0, 50.0]}, timepoints)  # a scan
 
     assert simulations.get_inputs(model) == pytest.approx(before)
+
+
+def test_run_applies_a_changed_compartment_qualified_species():
+    # The package used to ignore species named like "Calcium{compartment[3]}"
+    # (printing "not recognised"), so changing one silently did nothing. Fixed in
+    # QuickSimsBio 2026-09-29; this guards it from the app's side.
+    model = _example_model("array_1d")
+    target = "Calcium{compartment[3]}"
+    held = {name: [value] for name, value in simulations.get_inputs(model).items()}
+    timepoints = simulations.make_timepoints(0, 1000, 50)
+
+    wide, _ = simulations.run(model, {**held, target: [50.0]}, timepoints)
+
+    column = next(c for c in wide.columns if target in str(c))
+    assert wide[column].iloc[0] == pytest.approx(50.0)  # the run starts from the new value
