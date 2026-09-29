@@ -119,7 +119,9 @@ def use_custom_model_dialog():
         try:
             load_model(source["kind"], source["ref"])  # validate by loading
         except Exception as exc:  # broad: friendly message, not a traceback
-            st.error(f"Couldn't load **{name}**: {exc}")
+            st.error(
+                f"Couldn't load **{name}**. {models.describe_load_error(source, exc)}"
+            )
             return
         st.session_state.user_models[name] = source
         st.session_state.selected_model = name  # auto-select it on the rerun
@@ -466,7 +468,9 @@ source = registry[choice]
 try:
     load_model(source["kind"], source["ref"])
 except Exception as exc:  # broad on purpose: show a friendly message, not a traceback
-    st.sidebar.error(f"Couldn't load **{choice}**: {exc}")
+    st.sidebar.error(
+        f"Couldn't load **{choice}**. {models.describe_load_error(source, exc)}"
+    )
     st.stop()
 
 st.sidebar.success(f"Loaded **{choice}**.")

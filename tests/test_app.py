@@ -7,6 +7,7 @@ unit tests in ``test_simulations.py``. Here we check the table *renders* with th
 right defaults and that a default (all-Single) run produces a results table.
 """
 
+import urllib.error
 from unittest import mock
 
 import streamlit as st
@@ -48,6 +49,24 @@ def test_app_auto_selects_model_from_session_state():
 
     assert not at.exception
     assert at.selectbox[0].value == "brusselator"
+
+
+def test_app_blames_biomodels_when_its_server_fails():
+    # EBI returned 504s on 2026-09-28. The app must say it's BioModels' end, not
+    # show a raw error. The download is mocked, so this never touches the network.
+    st.cache_resource.clear()  # a cached real load must not mask the failure
+    at = AppTest.from_file("app/main.py")
+    at.session_state["user_models"] = {
+        "Some BioModel": {"kind": "biomodels", "ref": "MODEL0000000001"}
+    }
+    at.session_state["selected_model"] = "Some BioModel"
+
+    gateway_timeout = urllib.error.HTTPError("https://biomodels", 504, "Gateway Timeout", None, None)
+    with mock.patch("models.bsc.load_biomodel", side_effect=gateway_timeout):
+        at.run()
+
+    assert not at.exception
+    assert any("BioModels" in e.value and "isn't responding" in e.value for e in at.sidebar.error)
 
 
 def test_app_renders_inputs_table_with_every_input_as_single():

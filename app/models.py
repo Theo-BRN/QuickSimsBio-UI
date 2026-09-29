@@ -7,45 +7,48 @@ unit-tested without a running app (see CLAUDE.md > Architecture).
 
 A model in the registry is described by a small "tagged" source dict::
 
-    {"kind": "example",   "ref": "/path/to/model.cps"}   # a bundled COPASI example
+    {"kind": "bundled",   "ref": "CTCA.cps"}             # a file shipped in model_files/
+    {"kind": "example",   "ref": "/path/to/model.cps"}   # a COPASI example (via basico)
     {"kind": "biomodels", "ref": "MODEL2306220001"}      # a BioModels database id
+    {"kind": "uploaded",  "ref": "/tmp/…/model.cps"}     # a user's upload, this session
 
 ``kind`` is the single source of truth for *how* to load the model. It's also
-the seam for future persistence: ``biomodels`` entries are cheap id strings we
-can remember across sessions, while ``example`` (and, later, uploaded-file)
-entries are file-backed and session-only.
+the seam for future persistence: ``bundled`` and ``biomodels`` refs are short,
+portable strings we can save, while ``example`` and ``uploaded`` refs are paths
+tied to one machine.
 """
 
 import tempfile
+import urllib.error
 from pathlib import Path
 
 import basico as bsc
 
-
-# Hand-curated BioModels to offer alongside COPASI's bundled examples.
-# Adding one is intentionally a one-liner: {display name: BioModels id}.
-CURATED_BIOMODELS: dict[str, str] = {
-    "Cubic Ternary Complex Activation": "MODEL2306220001",
+# Models shipped inside the app, so they load instantly and never depend on a
+# network. {display name: file name in MODEL_FILES_DIR}. Adding one is dropping
+# the file in model_files/ and adding a line here.
+MODEL_FILES_DIR = Path(__file__).parent / "model_files"
+BUNDLED_MODELS: dict[str, str] = {
+    "Cubic Ternary Complex Activation": "CTCA.cps",
 }
 
 
 def get_model_registry() -> dict[str, dict]:
     """Return ``{display_name: source}`` for every selectable model.
 
-    Combines COPASI's bundled example models (discovered via basico) with the
-    hand-curated BioModels in ``CURATED_BIOMODELS``. Each value is a tagged
-    source dict (see the module docstring) describing how to load that model.
+    Combines COPASI's example models (discovered via basico) with the models
+    bundled in ``model_files/``. Each value is a tagged source dict (see the
+    module docstring) describing how to load that model.
     """
     examples = {
-        Path(path).stem: {"kind": "example", "ref": path}
-        for path in bsc.get_examples()
+        Path(path).stem: {"kind": "example", "ref": path} for path in bsc.get_examples()
     }
-    biomodels = {
-        name: {"kind": "biomodels", "ref": model_id}
-        for name, model_id in CURATED_BIOMODELS.items()
+    bundled = {
+        name: {"kind": "bundled", "ref": file_name}
+        for name, file_name in BUNDLED_MODELS.items()
     }
-    # Curated entries win on any name collision (explicit beats implicit).
-    return {**examples, **biomodels}
+    # Bundled entries win on any name collision (explicit beats discovered).
+    return {**examples, **bundled}
 
 
 def merge_user_models(base: dict, user: dict) -> dict:
@@ -95,8 +98,33 @@ def load_model(source: dict):
     becomes basico's current model. Raises ``ValueError`` for an unknown kind.
     """
     kind = source["kind"]
+    if kind == "bundled":
+        return _load_file(str(MODEL_FILES_DIR / source["ref"]))
     if kind in ("example", "uploaded"):
         return _load_file(source["ref"])
     if kind == "biomodels":
         return bsc.load_biomodel(source["ref"])
     raise ValueError(f"Unknown model source kind: {kind!r}")
+
+
+def describe_load_error(source: dict, exc: Exception) -> str:
+    """A plain-language reason a model failed to load, for the person using the app.
+
+    A BioModels model is downloaded from EBI's servers when it's first loaded, so a
+    slow or failing server looks exactly like a broken app. When the failure is on
+    BioModels' side, say so plainly, so nobody blames the model or themselves.
+    """
+    if source["kind"] == "biomodels":
+        # HTTPError is a kind of URLError, so check the specific case first.
+        if isinstance(exc, urllib.error.HTTPError) and exc.code == 404:
+            return (
+                f"BioModels has no model with the ID **{source['ref']}**. "
+                "Check the ID and try again."
+            )
+        if isinstance(exc, (urllib.error.URLError, TimeoutError, ConnectionError)):
+            return (
+                "BioModels (EBI's online model database) isn't responding right now, "
+                "so this model can't be downloaded. Please "
+                "try again later, or pick one of the models listed here."
+            )
+    return f"Something went wrong loading it: {exc}"

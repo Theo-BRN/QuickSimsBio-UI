@@ -5,6 +5,7 @@ COPASI. They check the *shape* of the registry and that ``load_model``
 dispatches to the right basico call per source kind.
 """
 
+import urllib.error
 from pathlib import Path
 
 import pytest
@@ -30,10 +31,43 @@ def test_registry_tags_examples_with_their_path():
     }
 
 
-def test_registry_tags_curated_biomodels_with_their_id():
+def test_registry_tags_bundled_models_with_their_file_name():
     registry = models.get_model_registry()
-    for name, model_id in models.CURATED_BIOMODELS.items():
-        assert registry[name] == {"kind": "biomodels", "ref": model_id}
+    for name, file_name in models.BUNDLED_MODELS.items():
+        assert registry[name] == {"kind": "bundled", "ref": file_name}
+
+
+def test_every_bundled_model_file_is_actually_there():
+    # A bundled file that never got committed would only show up as a broken
+    # model on the deployed app — catch it here instead.
+    for file_name in models.BUNDLED_MODELS.values():
+        assert (models.MODEL_FILES_DIR / file_name).is_file(), file_name
+
+
+def test_every_bundled_model_loads_with_no_network(monkeypatch):
+    # Real load (no stubs), with BioModels made unreachable: bundled models must
+    # never depend on EBI being up.
+    def no_network(*args, **kwargs):
+        raise AssertionError("a bundled model tried to reach BioModels")
+
+    monkeypatch.setattr(models.bsc, "load_biomodel", no_network)
+    for name, file_name in models.BUNDLED_MODELS.items():
+        model = models.load_model({"kind": "bundled", "ref": file_name})
+        assert models.bsc.get_species(model=model) is not None, name
+
+
+def test_load_model_dispatches_bundled_to_its_file(monkeypatch):
+    seen = {}
+
+    def fake_load_model(ref):
+        seen["ref"] = ref
+        return "loaded-bundled"
+
+    monkeypatch.setattr(models.bsc, "load_model", fake_load_model)
+    result = models.load_model({"kind": "bundled", "ref": "CTCA.cps"})
+
+    assert result == "loaded-bundled"
+    assert seen["ref"] == str(models.MODEL_FILES_DIR / "CTCA.cps")
 
 
 def test_load_model_dispatches_example_to_load_model(monkeypatch):
@@ -105,6 +139,39 @@ def test_load_model_dispatches_uploaded_cps_to_load_model(monkeypatch):
 
     assert result == "loaded-file"
     assert seen["ref"] == "/tmp/x.cps"
+
+
+_BIOMODEL = {"kind": "biomodels", "ref": "MODEL2306220001"}
+
+
+def _http_error(code):
+    return urllib.error.HTTPError("https://biomodels", code, "msg", None, None)
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        _http_error(504),  # gateway timeout — what EBI returned on 2026-09-28
+        _http_error(503),
+        urllib.error.URLError("no route to host"),
+        TimeoutError(),
+        ConnectionError(),
+    ],
+)
+def test_describe_load_error_blames_biomodels_when_it_is_their_end(exc):
+    message = models.describe_load_error(_BIOMODEL, exc)
+    assert "BioModels" in message and "isn't responding" in message
+
+
+def test_describe_load_error_says_when_a_biomodels_id_does_not_exist():
+    message = models.describe_load_error(_BIOMODEL, _http_error(404))
+    assert "no model with the ID" in message and "MODEL2306220001" in message
+
+
+def test_describe_load_error_never_blames_biomodels_for_a_local_file():
+    source = {"kind": "uploaded", "ref": "/tmp/x.cps"}
+    message = models.describe_load_error(source, urllib.error.URLError("x"))
+    assert "BioModels" not in message
 
 
 def test_load_model_dispatches_sbml_to_import_sbml(monkeypatch):
