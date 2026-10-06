@@ -58,6 +58,19 @@ def test_every_model_description_names_a_real_model(monkeypatch):
     assert set(models.MODEL_DESCRIPTIONS) <= set(registry)
 
 
+def test_registry_offers_only_described_examples(monkeypatch):
+    # Developer test models (no description) stay out of a non-modeller's list;
+    # bundled models are always offered.
+    monkeypatch.setattr(
+        models.bsc, "get_examples", lambda: ["/data/brusselator.cps", "/data/LM-test1.cps"]
+    )
+    registry = models.get_model_registry()
+
+    assert "brusselator" in registry  # described
+    assert "LM-test1" not in registry  # a fitting example, no description
+    assert set(models.BUNDLED_MODELS) <= set(registry)
+
+
 def test_default_model_has_a_description():
     assert models.MODEL_DESCRIPTIONS.get(models.DEFAULT_MODEL)
 

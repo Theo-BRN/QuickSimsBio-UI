@@ -57,6 +57,17 @@ def get_inputs_cached(kind: str, ref: str) -> dict:
 
 
 @st.cache_data(show_spinner=False)
+def get_input_kinds_cached(kind: str, ref: str) -> dict:
+    """Each input's kind (``"parameter"`` / ``"species"``), per model.
+
+    Same cache pattern as ``get_inputs_cached``. Labels the chip inputs and picks
+    the newcomer example (a few of each kind).
+    """
+    model = load_model(kind, ref)
+    return simulations.get_input_kinds(model)
+
+
+@st.cache_data(show_spinner=False)
 def get_events_cached(kind: str, ref: str):
     """The model's events (resolved) and its time unit, per model.
 
@@ -428,6 +439,69 @@ def render_table_mode(tab: str, source: dict):
         render_results(tab, source)
 
 
+def render_time_course_mode(tab: str, source: dict):
+    """Time course: change a few inputs, and everything else runs at its default.
+
+    Inputs are picked as "chips" in a type-to-search box (``st.multiselect``); each
+    chip reveals a value box, and removing a chip puts that input back to its
+    default. It starts with a newcomer's example (``simulations.example_inputs``).
+    Keys include the model, so switching model starts afresh.
+    """
+    defaults = get_inputs_cached(source["kind"], source["ref"])
+    kinds = get_input_kinds_cached(source["kind"], source["ref"])
+    model_key = f"{tab}::{source['kind']}::{source['ref']}"
+
+    col_inputs, col_outputs = st.columns(2, gap="large")
+
+    with col_inputs:
+        st.subheader("Inputs")
+        chosen = st.multiselect(
+            "Change inputs",
+            options=list(defaults),
+            default=simulations.example_inputs(kinds),
+            format_func=lambda name: f"{name} · {kinds[name]}",
+            placeholder="Type to find an input…",
+            key=f"{model_key}::chips",
+        )
+        changed = {}
+        for name in chosen:
+            # "%g" keeps tiny and huge values readable (1e-12, not 0.00), and the
+            # +/− step scales with the value rather than a fixed 0.01.
+            changed[name] = st.number_input(
+                name,
+                value=defaults[name],
+                step=simulations.input_step(defaults[name]),
+                format="%g",
+                key=f"{model_key}::value::{name}",
+            )
+        st.caption("Everything else runs at the model's default.")
+        scan_dict = simulations.build_scan_dict_from_values(defaults, changed)
+
+        start, end, n_points, time_error = render_time_window(tab)
+        render_events_panel(tab, source, end)
+
+        # On click, only stash this tab's request; render_results draws from it on
+        # every rerun (see render_table_mode for why).
+        if st.button(
+            "Run simulation",
+            type="primary",
+            width="stretch",
+            key=f"{tab}::run",
+            disabled=bool(time_error),
+        ):
+            st.session_state[f"last_run::{tab}"] = {
+                "kind": source["kind"],
+                "ref": source["ref"],
+                "scan_dict": scan_dict,
+                "timepoints": simulations.make_timepoints(start, end, int(n_points)),
+                "scales": {},  # a time course scans nothing, so no axis is logged
+            }
+
+    with col_outputs:
+        st.subheader("Outputs")
+        render_results(tab, source)
+
+
 # --- Page ---------------------------------------------------------------------
 st.title("QuickSimsBio")
 
@@ -496,9 +570,7 @@ tab_time, tab_single, tab_two, tab_multi = st.tabs(
 )
 
 with tab_time:
-    # Still the general table for now; step 2b gives Time course its own simpler
-    # chip-based inputs, leaving the table to "Vary multiple inputs".
-    render_table_mode("time_course", source)
+    render_time_course_mode("time_course", source)
 
 with tab_single:
     st.caption(

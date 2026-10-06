@@ -55,6 +55,46 @@ def test_app_opens_with_the_default_model_loaded():
     assert "default model" in model_caption and "sidebar" in model_caption
 
 
+def test_time_course_offers_chip_inputs_instead_of_the_table():
+    at = AppTest.from_file(APP_SCRIPT)
+    at.session_state["selected_model"] = "brusselator"
+    at.run()
+    assert not at.exception
+
+    time_course, vary_multiple = at.tabs[0], at.tabs[3]
+    chips = time_course.multiselect[0]
+    assert chips.label == "Change inputs"
+    # brusselator has 6 inputs, all species: more than 5, so the newcomer
+    # example is the first 3 of that kind.
+    assert chips.value == ["X", "Y", "A"]
+    assert {"X", "Y", "A"} <= {n.label for n in time_course.number_input}  # a box per chip
+
+    def has_table(tab):
+        return any(d.key and d.key.startswith("input_editor") for d in tab.dataframe)
+
+    assert not has_table(time_course)
+    assert has_table(vary_multiple)  # the general table lives on there
+
+
+def test_time_course_runs_a_changed_chip_value_and_holds_the_rest_at_default():
+    at = AppTest.from_file(APP_SCRIPT)
+    at.session_state["selected_model"] = "brusselator"
+    at.run()
+    time_course = at.tabs[0]
+    defaults = {n.label: n.value for n in time_course.number_input}
+
+    _number_input(at, "Number of points").set_value(20).run()
+    next(n for n in at.tabs[0].number_input if n.label == "X").set_value(0.5).run()
+    next(b for b in at.tabs[0].button if b.label == "Run simulation").click().run(timeout=60)
+
+    assert not at.exception
+    scan_dict = at.session_state["last_run::time_course"]["scan_dict"]
+    assert scan_dict["X"] == [0.5]  # the changed chip
+    assert scan_dict["Y"] == [defaults["Y"]]  # a chip left alone
+    assert len(scan_dict["B"]) == 1  # not a chip: still one run, held at default
+    assert len(at.tabs[0].get("plotly_chart")) == 1
+
+
 def test_app_describes_a_chosen_model_without_the_default_model_pointer():
     at = AppTest.from_file(APP_SCRIPT)
     at.session_state["selected_model"] = "brusselator"

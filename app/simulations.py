@@ -130,6 +130,17 @@ def example_inputs(
 
 
 # --- Inputs: time course (values → scan_dict) ---------------------------------
+def input_step(default: float) -> float:
+    """How far one click of an input box's +/− moves it: about 10% of its default.
+
+    Model inputs span many orders of magnitude — a rate constant of 1e-12 beside a
+    concentration of 100 — so a fixed step like Streamlit's 0.01 is useless for
+    most of them. An input whose default is 0 gets a step of 0.1.
+    """
+    return abs(default) * 0.1 if default else 0.1
+
+
+
 def build_scan_dict_from_values(
     defaults: dict[str, float], changed: dict[str, float]
 ) -> dict[str, list[float]]:

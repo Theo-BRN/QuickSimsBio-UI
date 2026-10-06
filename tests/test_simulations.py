@@ -140,6 +140,15 @@ def test_example_inputs_of_a_large_single_kind_model_shows_just_the_first_few():
     assert simulations.example_inputs(kinds) == ["S0", "S1", "S2"]
 
 
+# --- input_step ---------------------------------------------------------------
+@pytest.mark.parametrize(
+    "default, step",
+    [(100.0, 10.0), (1e-12, 1e-13), (-2.0, 0.2), (0.0, 0.1)],
+)
+def test_input_step_is_a_tenth_of_the_default_whatever_its_size(default, step):
+    assert simulations.input_step(default) == pytest.approx(step)
+
+
 # --- build_scan_dict_from_values ----------------------------------------------
 def test_build_scan_dict_from_values_holds_unchanged_inputs_at_default():
     defaults = {"k": 2.0, "X": 3.0, "Y": 4.0}

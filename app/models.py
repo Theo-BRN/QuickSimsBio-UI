@@ -35,8 +35,9 @@ BUNDLED_MODELS: dict[str, str] = {
 
 # One-line, plain-language descriptions shown under the title, keyed by display
 # name. Drafted from each model file's own notes; it's plain text in a JSON file,
-# so it can be edited without touching code. A model with no entry just shows its
-# name.
+# so it can be edited without touching code. This file is ALSO the curated list of
+# COPASI examples: an example is only offered if it has a description here (see
+# get_model_registry). Bundled models are always offered.
 MODEL_DESCRIPTIONS: dict[str, str] = json.loads(
     (MODEL_FILES_DIR / "descriptions.json").read_text(encoding="utf-8")
 )
@@ -54,9 +55,16 @@ def get_model_registry() -> dict[str, dict]:
     Combines COPASI's example models (discovered via basico) with the models
     bundled in ``model_files/``. Each value is a tagged source dict (see the
     module docstring) describing how to load that model.
+
+    Only examples with an entry in ``MODEL_DESCRIPTIONS`` are offered. basico ships
+    developer test models (fitting examples, solver stress tests) that mean nothing
+    to the non-modellers this app is for, and describing a model is a deliberate
+    act — so a future basico update can't slip new test models into the list.
     """
     examples = {
-        Path(path).stem: {"kind": "example", "ref": path} for path in bsc.get_examples()
+        Path(path).stem: {"kind": "example", "ref": path}
+        for path in bsc.get_examples()
+        if Path(path).stem in MODEL_DESCRIPTIONS
     }
     bundled = {
         name: {"kind": "bundled", "ref": file_name}
