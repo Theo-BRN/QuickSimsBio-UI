@@ -1,0 +1,15 @@
+{
+  "BIOM10-fit": "The MAPK signalling cascade of Kholodenko (2000), a classic three-tier kinase cascade.",
+  "MAPK-HF96-layout": "Ultrasensitivity in the MAPK cascade (Huang & Ferrell, 1996).",
+  "Genetic-2000Elo": "The repressilator: a synthetic oscillating network of gene regulators (Elowitz & Leibler, 2000).",
+  "brusselator": "The Brusselator: a classic chemical oscillator in which X catalyses its own formation.",
+  "Olsen2003_peroxidase": "Oscillations of the enzyme peroxidase (Olsen, Hauser & Kummer, 2003).",
+  "YeastGlycolysis": "Yeast glycolysis (Pritchard & Kell, 2002), simulating a fall in external glucose.",
+  "PK_fit2": "Yeast glycolysis (Pritchard & Kell, 2002): an alternative version of the YeastGlycolysis model.",
+  "NF-kappaB": "Oscillations in NF-κB signalling (Nelson et al., 2004).",
+  "CircadianClock": "The fruit-fly circadian clock, driven by the PER and TIM genes (Leloup & Goldbeter, 1999).",
+  "array_1d": "Calcium oscillations (Kummer et al., 2000), repeated across a row of 20 compartments.",
+  "DimericMWC-stiff": "An allosteric (MWC) dimeric enzyme, and a deliberately 'stiff', hard-to-solve model.",
+  "LM-test1": "A Michaelis–Menten enzyme progress curve, originally built as a parameter-fitting example.",
+  "turing_base": "Turing patterns: a two-species reaction–diffusion example."
+}

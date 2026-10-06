@@ -445,7 +445,8 @@ with st.sidebar:
     # Keep selection in our OWN state (not the selectbox's key) so the dialog can
     # set it freely, and feed it back as the index. Feeding the index also restores
     # the choice when the options list changes (e.g. a custom model was just added).
-    selected = st.session_state.get("selected_model")
+    # A first visit starts on models.DEFAULT_MODEL rather than an empty picker.
+    selected = st.session_state.get("selected_model", models.DEFAULT_MODEL)
     index = options.index(selected) if selected in options else None
 
     # index=None gives the greyed "Choose a model…" placeholder (nothing selected).
@@ -461,7 +462,7 @@ with st.sidebar:
         use_custom_model_dialog()
 
 if choice is None:
-    st.info("Pick a model to get started.")
+    st.info("Pick a model via the sidebar to get started.")
     st.stop()
 
 source = registry[choice]
@@ -474,6 +475,18 @@ except Exception as exc:  # broad on purpose: show a friendly message, not a tra
     st.stop()
 
 st.sidebar.success(f"Loaded **{choice}**.")
+
+# Say in the main area which model is loaded and what it is (UX rule 1:
+# visibility of system status). On the default model, also say how to change it:
+# the sidebar starts hidden on a phone, so a first-time visitor can't see it.
+description = models.MODEL_DESCRIPTIONS.get(choice)
+model_line = f"**{choice}** — {description}" if description else f"**{choice}**"
+if choice == models.DEFAULT_MODEL:
+    model_line += (
+        "  \nThis is the default model. Choose another in the sidebar — on a phone, "
+        "tap the arrow at the top of the screen to open it."
+    )
+st.caption(model_line)
 
 # --- Analysis tabs ------------------------------------------------------------
 # One tab per analysis mode, mirroring the 0-D / 1-D / 2-D / n-D structure that

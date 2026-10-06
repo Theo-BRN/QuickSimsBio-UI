@@ -18,6 +18,7 @@ portable strings we can save, while ``example`` and ``uploaded`` refs are paths
 tied to one machine.
 """
 
+import json
 import tempfile
 import urllib.error
 from pathlib import Path
@@ -31,6 +32,20 @@ MODEL_FILES_DIR = Path(__file__).parent / "model_files"
 BUNDLED_MODELS: dict[str, str] = {
     "Cubic Ternary Complex Activation": "CTCA.cps",
 }
+
+# One-line, plain-language descriptions shown under the title, keyed by display
+# name. Drafted from each model file's own notes; it's plain text in a JSON file,
+# so it can be edited without touching code. A model with no entry just shows its
+# name.
+MODEL_DESCRIPTIONS: dict[str, str] = json.loads(
+    (MODEL_FILES_DIR / "descriptions.json").read_text(encoding="utf-8")
+)
+
+# What a first visit opens with. On a phone the sidebar (where models are picked)
+# starts hidden, so the app must be usable before anyone finds it. BIOM10-fit is a
+# MAPK cascade — a widely recognised example — and ships with basico, so it loads
+# instantly and needs no network.
+DEFAULT_MODEL = "BIOM10-fit"
 
 
 def get_model_registry() -> dict[str, dict]:

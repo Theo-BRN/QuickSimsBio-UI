@@ -12,6 +12,10 @@ import pytest
 
 import models
 
+# Captured at import, before the autouse stub below replaces it, for the few
+# tests that need basico's real example list.
+_REAL_GET_EXAMPLES = models.bsc.get_examples
+
 
 @pytest.fixture(autouse=True)
 def stub_examples(monkeypatch):
@@ -35,6 +39,33 @@ def test_registry_tags_bundled_models_with_their_file_name():
     registry = models.get_model_registry()
     for name, file_name in models.BUNDLED_MODELS.items():
         assert registry[name] == {"kind": "bundled", "ref": file_name}
+
+
+def test_default_model_never_depends_on_biomodels(monkeypatch):
+    # A first visit must load with no network: the default has to ship with the
+    # app (bundled) or with basico (a COPASI example) — never be a download.
+    # Uses the real example list, not this module's stub.
+    monkeypatch.setattr(models.bsc, "get_examples", _REAL_GET_EXAMPLES)
+    registry = models.get_model_registry()
+    assert models.DEFAULT_MODEL in registry
+    assert registry[models.DEFAULT_MODEL]["kind"] in ("bundled", "example")
+
+
+def test_every_model_description_names_a_real_model(monkeypatch):
+    # A renamed or mistyped model would otherwise leave an orphaned description.
+    monkeypatch.setattr(models.bsc, "get_examples", _REAL_GET_EXAMPLES)
+    registry = models.get_model_registry()
+    assert set(models.MODEL_DESCRIPTIONS) <= set(registry)
+
+
+def test_default_model_has_a_description():
+    assert models.MODEL_DESCRIPTIONS.get(models.DEFAULT_MODEL)
+
+
+def test_model_descriptions_are_single_short_lines_that_fit_a_phone():
+    for name, text in models.MODEL_DESCRIPTIONS.items():
+        assert "\n" not in text, name
+        assert len(text) <= 110, f"{name}: {len(text)} characters"
 
 
 def test_every_bundled_model_file_is_actually_there():

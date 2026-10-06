@@ -8,12 +8,19 @@ right defaults and that a default (all-Single) run produces a results table.
 """
 
 import urllib.error
+from pathlib import Path
 from unittest import mock
 
 import streamlit as st
 from streamlit.testing.v1 import AppTest
 
 import events
+import models
+
+# Absolute, built from this file's location. Streamlit 1.65 resolves a *relative*
+# AppTest path against the calling test file (tests/), not the working directory,
+# so "app/main.py" would point at tests/app/main.py.
+APP_SCRIPT = str(Path(__file__).resolve().parent.parent / "app" / "main.py")
 
 
 def _input_editor(at):
@@ -31,19 +38,38 @@ def _number_input(at, label):
     return next(n for n in at.number_input if n.label == label)
 
 
-def test_app_renders_model_picker_with_nothing_selected():
-    at = AppTest.from_file("app/main.py").run()
+def test_app_opens_with_the_default_model_loaded():
+    # On a phone the sidebar starts hidden, so a first visit must land on a
+    # working app — not "pick a model" with no picker in sight.
+    at = AppTest.from_file(APP_SCRIPT).run()
 
     assert not at.exception
     assert at.selectbox[0].label == "Model"
-    assert at.selectbox[0].value is None  # placeholder shown, no model loaded
+    assert at.selectbox[0].value == models.DEFAULT_MODEL
+    assert len(at.tabs) == 4  # straight into the analysis tabs
     assert any(b.label == "Use custom model" for b in at.button)
+
+    # Named and described in the main area, with a pointer to change it.
+    model_caption = next(c.value for c in at.caption if models.DEFAULT_MODEL in c.value)
+    assert models.MODEL_DESCRIPTIONS[models.DEFAULT_MODEL] in model_caption
+    assert "default model" in model_caption and "sidebar" in model_caption
+
+
+def test_app_describes_a_chosen_model_without_the_default_model_pointer():
+    at = AppTest.from_file(APP_SCRIPT)
+    at.session_state["selected_model"] = "brusselator"
+    at.run()
+
+    assert not at.exception
+    model_caption = next(c.value for c in at.caption if "brusselator" in c.value)
+    assert models.MODEL_DESCRIPTIONS["brusselator"] in model_caption
+    assert "default model" not in model_caption
 
 
 def test_app_auto_selects_model_from_session_state():
     # Mimics what the "use custom model" dialog does on success: set the
     # selection in our own state, then the app should select AND load it.
-    at = AppTest.from_file("app/main.py")
+    at = AppTest.from_file(APP_SCRIPT)
     at.session_state["selected_model"] = "brusselator"
     at.run()
 
@@ -55,7 +81,7 @@ def test_app_blames_biomodels_when_its_server_fails():
     # EBI returned 504s on 2026-09-28. The app must say it's BioModels' end, not
     # show a raw error. The download is mocked, so this never touches the network.
     st.cache_resource.clear()  # a cached real load must not mask the failure
-    at = AppTest.from_file("app/main.py")
+    at = AppTest.from_file(APP_SCRIPT)
     at.session_state["user_models"] = {
         "Some BioModel": {"kind": "biomodels", "ref": "MODEL0000000001"}
     }
@@ -70,7 +96,7 @@ def test_app_blames_biomodels_when_its_server_fails():
 
 
 def test_app_renders_inputs_table_with_every_input_as_single():
-    at = AppTest.from_file("app/main.py")
+    at = AppTest.from_file(APP_SCRIPT)
     at.session_state["selected_model"] = "brusselator"
     at.run()
     assert not at.exception
@@ -84,7 +110,7 @@ def test_app_runs_a_default_simulation_and_shows_a_results_table():
     # End-to-end slice: a loaded model + Run (all inputs Single at default) → a
     # results table. This actually runs COPASI via quicksimsbio, so we shrink the
     # run (few points) and give the click a generous timeout.
-    at = AppTest.from_file("app/main.py")
+    at = AppTest.from_file(APP_SCRIPT)
     at.session_state["selected_model"] = "brusselator"
     at.run()
     assert not at.exception
@@ -104,7 +130,7 @@ def test_app_shows_a_friendly_error_when_a_run_fails():
     # the failure by patching simulations.run to raise (clearing the cache first so
     # a previously-cached good result can't mask it).
     st.cache_data.clear()
-    at = AppTest.from_file("app/main.py")
+    at = AppTest.from_file(APP_SCRIPT)
     at.session_state["selected_model"] = "brusselator"
     at.run()
     assert not at.exception
@@ -118,7 +144,7 @@ def test_app_shows_a_friendly_error_when_a_run_fails():
 
 
 def test_app_shows_one_tab_per_analysis_mode():
-    at = AppTest.from_file("app/main.py")
+    at = AppTest.from_file(APP_SCRIPT)
     at.session_state["selected_model"] = "brusselator"
     at.run()
     assert not at.exception
@@ -134,7 +160,7 @@ def test_app_shows_one_tab_per_analysis_mode():
 def test_app_puts_run_and_time_window_in_the_time_course_tab_not_the_sidebar():
     # Each tab gets its own Run, beside the inputs it runs, so Run must never need
     # to know which tab is active. The sidebar is for choosing a model only.
-    at = AppTest.from_file("app/main.py")
+    at = AppTest.from_file(APP_SCRIPT)
     at.session_state["selected_model"] = "brusselator"
     at.run()
     assert not at.exception
@@ -156,7 +182,7 @@ def test_app_a_failed_run_in_one_tab_leaves_every_other_tab_intact():
     # would flag that, so this pins it. Time course (first tab) fails; the tabs
     # after it must still be fully drawn.
     st.cache_data.clear()
-    at = AppTest.from_file("app/main.py")
+    at = AppTest.from_file(APP_SCRIPT)
     at.session_state["selected_model"] = "brusselator"
     at.run()
 
@@ -173,7 +199,7 @@ def test_app_a_failed_run_in_one_tab_leaves_every_other_tab_intact():
 def test_app_keeps_each_tabs_results_to_itself():
     # Each tab stores its own run request, so a run in Time course must not show
     # up as results in Vary multiple inputs.
-    at = AppTest.from_file("app/main.py")
+    at = AppTest.from_file(APP_SCRIPT)
     at.session_state["selected_model"] = "brusselator"
     at.run()
 
@@ -192,7 +218,7 @@ def test_app_keeps_the_raw_table_when_plotting_fails():
     # warn — rather than blanking the view. Force it by patching kinetics_figure
     # (a default all-Single run is 0-D, so kinetics_figure is what gets called).
     st.cache_data.clear()
-    at = AppTest.from_file("app/main.py")
+    at = AppTest.from_file(APP_SCRIPT)
     at.session_state["selected_model"] = "brusselator"
     at.run()
     assert not at.exception
@@ -218,7 +244,7 @@ def _late_event():
 
 def test_app_warns_when_the_run_window_misses_a_models_events():
     st.cache_data.clear()
-    at = AppTest.from_file("app/main.py")
+    at = AppTest.from_file(APP_SCRIPT)
     at.session_state["selected_model"] = "brusselator"
 
     # Default End time is 1000; the event fires at 1e6, so the run never reaches it.
@@ -231,7 +257,7 @@ def test_app_warns_when_the_run_window_misses_a_models_events():
 
 def test_app_clears_the_miss_warning_once_the_window_reaches_the_event():
     st.cache_data.clear()
-    at = AppTest.from_file("app/main.py")
+    at = AppTest.from_file(APP_SCRIPT)
     at.session_state["selected_model"] = "brusselator"
 
     with mock.patch("events.read_events", return_value=[_late_event()]):
@@ -248,7 +274,7 @@ def test_app_clears_the_miss_warning_once_the_window_reaches_the_event():
 
 def test_app_shows_no_events_section_for_a_model_without_events():
     st.cache_data.clear()
-    at = AppTest.from_file("app/main.py")
+    at = AppTest.from_file(APP_SCRIPT)
     at.session_state["selected_model"] = "brusselator"
 
     with mock.patch("events.read_events", return_value=[]):
