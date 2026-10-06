@@ -17,6 +17,8 @@ defaults → starting table) and ``build_scan_dict_from_table`` (edited table �
 logic testable.
 """
 
+import math
+
 import basico as bsc
 import numpy as np
 import pandas as pd
@@ -127,6 +129,37 @@ def example_inputs(
             chosen.append(name)
             taken_per_kind[kind] = taken_per_kind.get(kind, 0) + 1
     return chosen
+
+
+# --- Inputs: fold-change sliders ----------------------------------------------
+# A slider moves an input through multiples of its default rather than evenly
+# spaced values: inputs span orders of magnitude, and "2× more", "a tenth" is how
+# experimentalists think about a change anyway.
+DEFAULT_FOLD_RANGE = (0.01, 100.0)
+
+
+def fold_options(low: float, high: float) -> list[float]:
+    """Fold changes from ``low`` to ``high`` on a 1-2-5 scale (…, 0.5, 1, 2, 5, 10, …).
+
+    1-2-5 steps are round numbers people read at a glance. Ends are included when
+    they fall on the scale.
+    """
+    options = []
+    for exponent in range(math.floor(math.log10(low)), math.ceil(math.log10(high)) + 1):
+        for mantissa in (1, 2, 5):
+            fold = float(f"{mantissa}e{exponent}")  # exact, unlike 2 * 10**-2
+            if low * (1 - 1e-9) <= fold <= high * (1 + 1e-9):
+                options.append(fold)
+    return options
+
+
+# Every range the ⋯ menu can set, from 1/10,000× to 10,000×.
+FOLD_BOUND_OPTIONS = fold_options(1e-4, 1e4)
+
+
+def nearest_fold(options: list[float], fold: float) -> float:
+    """The option closest to ``fold`` — measured on a log scale, as suits multiples."""
+    return min(options, key=lambda option: abs(math.log10(option) - math.log10(fold)))
 
 
 # --- Inputs: time course (values → scan_dict) ---------------------------------

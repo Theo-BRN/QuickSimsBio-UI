@@ -11,6 +11,7 @@ import urllib.error
 from pathlib import Path
 from unittest import mock
 
+import pytest
 import streamlit as st
 from streamlit.testing.v1 import AppTest
 
@@ -44,9 +45,10 @@ def test_app_opens_with_the_default_model_loaded():
     at = AppTest.from_file(APP_SCRIPT).run()
 
     assert not at.exception
-    assert at.selectbox[0].label == "Model"
-    assert at.selectbox[0].value == models.DEFAULT_MODEL
+    assert at.sidebar.selectbox[0].label == "Model"
+    assert at.sidebar.selectbox[0].value == models.DEFAULT_MODEL
     assert len(at.tabs) == 4  # straight into the analysis tabs
+    assert len(at.tabs[0].get("plotly_chart")) == 1  # a result with nothing clicked
     assert any(b.label == "Use custom model" for b in at.button)
 
     # Named and described in the main area, with a pointer to change it.
@@ -55,19 +57,29 @@ def test_app_opens_with_the_default_model_loaded():
     assert "default model" in model_caption and "sidebar" in model_caption
 
 
-def test_time_course_offers_chip_inputs_instead_of_the_table():
+def _slider(tab, label):
+    return next(s for s in tab.select_slider if s.label == label)
+
+
+def _keyed(elements, suffix):
+    """The element whose key ends with ``suffix`` (e.g. '::remove::X')."""
+    return next(e for e in elements if e.key and e.key.endswith(suffix))
+
+
+def test_time_course_offers_an_input_picker_and_sliders_instead_of_the_table():
     at = AppTest.from_file(APP_SCRIPT)
     at.session_state["selected_model"] = "brusselator"
     at.run()
     assert not at.exception
 
     time_course, vary_multiple = at.tabs[0], at.tabs[3]
-    chips = time_course.multiselect[0]
-    assert chips.label == "Change inputs"
+    picker = time_course.selectbox[0]
+    assert picker.label == "Add an input" and picker.value is None
     # brusselator has 6 inputs, all species: more than 5, so the newcomer
-    # example is the first 3 of that kind.
-    assert chips.value == ["X", "Y", "A"]
-    assert {"X", "Y", "A"} <= {n.label for n in time_course.number_input}  # a box per chip
+    # example is the first 3 of that kind — each a slider starting at 1×.
+    for name in ("X", "Y", "A"):
+        assert _slider(time_course, name).value == 1.0
+    assert "Run simulation" not in [b.label for b in time_course.button]  # it auto-runs
 
     def has_table(tab):
         return any(d.key and d.key.startswith("input_editor") for d in tab.dataframe)
@@ -76,23 +88,64 @@ def test_time_course_offers_chip_inputs_instead_of_the_table():
     assert has_table(vary_multiple)  # the general table lives on there
 
 
-def test_time_course_runs_a_changed_chip_value_and_holds_the_rest_at_default():
+def test_time_course_reruns_when_a_slider_moves_and_holds_the_rest_at_default():
     at = AppTest.from_file(APP_SCRIPT)
     at.session_state["selected_model"] = "brusselator"
     at.run()
-    time_course = at.tabs[0]
-    defaults = {n.label: n.value for n in time_course.number_input}
-
     _number_input(at, "Number of points").set_value(20).run()
-    next(n for n in at.tabs[0].number_input if n.label == "X").set_value(0.5).run()
-    next(b for b in at.tabs[0].button if b.label == "Run simulation").click().run(timeout=60)
+    before = at.session_state["last_run::time_course"]["scan_dict"]
+
+    _slider(at.tabs[0], "X").set_value(2.0).run()  # no Run button: this alone re-runs
 
     assert not at.exception
-    scan_dict = at.session_state["last_run::time_course"]["scan_dict"]
-    assert scan_dict["X"] == [0.5]  # the changed chip
-    assert scan_dict["Y"] == [defaults["Y"]]  # a chip left alone
-    assert len(scan_dict["B"]) == 1  # not a chip: still one run, held at default
+    after = at.session_state["last_run::time_course"]["scan_dict"]
+    assert after["X"] == [pytest.approx(2 * before["X"][0])]  # 2× its default
+    assert after["Y"] == before["Y"]  # a slider left alone
+    assert len(after["B"]) == 1  # not chosen: still one run, held at default
     assert len(at.tabs[0].get("plotly_chart")) == 1
+
+
+def test_time_course_adds_and_removes_inputs():
+    at = AppTest.from_file(APP_SCRIPT)
+    at.session_state["selected_model"] = "brusselator"
+    at.run()
+
+    at.tabs[0].selectbox[0].set_value("B").run()  # add B from the picker
+    assert not at.exception
+    assert _slider(at.tabs[0], "B").value == 1.0
+    assert at.tabs[0].selectbox[0].value is None  # the picker clears itself
+
+    _keyed(at.tabs[0].button, "::remove::X").click().run()  # remove X via its ⋯ menu
+    assert not at.exception
+    assert "X" not in [s.label for s in at.tabs[0].select_slider]
+    assert "X · species" in at.tabs[0].selectbox[0].options  # back in the picker (as shown)
+
+
+def test_time_course_slider_range_can_be_changed_and_used():
+    # Regression: the range control once lost its two handles after one change
+    # (Streamlit infers a range slider from value=), and the next run crashed.
+    at = AppTest.from_file(APP_SCRIPT)
+    at.session_state["selected_model"] = "brusselator"
+    at.run()
+
+    _keyed(at.tabs[0].select_slider, "::range::X").set_value((0.5, 20.0)).run()
+    assert not at.exception
+    assert len(_slider(at.tabs[0], "X").options) == 6  # 0.5, 1, 2, 5, 10, 20 (×)
+
+    _slider(at.tabs[0], "X").set_value(5.0).run()  # keep interacting: this is what crashed
+    assert not at.exception
+
+
+def test_time_course_gives_a_zero_default_a_number_box_not_a_slider():
+    # 10 × 0 is still 0, so fold-change can't move an input that starts at zero.
+    at = AppTest.from_file(APP_SCRIPT)
+    at.session_state["selected_model"] = "Cubic Ternary Complex Activation"
+    at.run()
+    assert not at.exception
+
+    time_course = at.tabs[0]
+    assert "L" in [n.label for n in time_course.number_input]  # ligand, default 0
+    assert "kL+" in [s.label for s in time_course.select_slider]  # non-zero: a slider
 
 
 def test_app_describes_a_chosen_model_without_the_default_model_pointer():
@@ -114,7 +167,7 @@ def test_app_auto_selects_model_from_session_state():
     at.run()
 
     assert not at.exception
-    assert at.selectbox[0].value == "brusselator"
+    assert at.sidebar.selectbox[0].value == "brusselator"
 
 
 def test_app_blames_biomodels_when_its_server_fails():
@@ -147,17 +200,15 @@ def test_app_renders_inputs_table_with_every_input_as_single():
 
 
 def test_app_runs_a_default_simulation_and_shows_a_results_table():
-    # End-to-end slice: a loaded model + Run (all inputs Single at default) → a
-    # results table. This actually runs COPASI via quicksimsbio, so we shrink the
-    # run (few points) and give the click a generous timeout.
+    # End-to-end slice: a loaded model → Time course runs by itself (all inputs at
+    # default) → a results table. This actually runs COPASI via quicksimsbio, so
+    # we shrink the run (few points) and give it a generous timeout.
     at = AppTest.from_file(APP_SCRIPT)
     at.session_state["selected_model"] = "brusselator"
     at.run()
     assert not at.exception
 
-    _number_input(at, "Number of points").set_value(20).run()
-
-    next(b for b in at.button if b.label == "Run simulation").click().run(timeout=60)
+    _number_input(at, "Number of points").set_value(20).run(timeout=60)
 
     assert not at.exception
     results = _result_tables(at)
@@ -166,20 +217,18 @@ def test_app_runs_a_default_simulation_and_shows_a_results_table():
 
 
 def test_app_shows_a_friendly_error_when_a_run_fails():
-    # A failing simulation must degrade to a message, never a traceback. We force
-    # the failure by patching simulations.run to raise (clearing the cache first so
-    # a previously-cached good result can't mask it).
+    # A failing simulation must degrade to a message, never a traceback. Time
+    # course runs on load, so the failure is patched in *before* the first run
+    # (and the cache cleared so an earlier good result can't mask it).
     st.cache_data.clear()
     at = AppTest.from_file(APP_SCRIPT)
     at.session_state["selected_model"] = "brusselator"
-    at.run()
-    assert not at.exception
 
     with mock.patch("simulations.run", side_effect=RuntimeError("boom")):
-        next(b for b in at.button if b.label == "Run simulation").click().run()
+        at.run()
 
-    assert not at.exception  # st.stop() is normal control flow, not a crash
-    assert any("complete the simulation" in e.value.lower() for e in at.error)
+    assert not at.exception
+    assert any("complete the simulation" in e.value.lower() for e in at.tabs[0].error)
     assert _result_tables(at) == []  # no data, so no results table
 
 
@@ -197,19 +246,19 @@ def test_app_shows_one_tab_per_analysis_mode():
     ]
 
 
-def test_app_puts_run_and_time_window_in_the_time_course_tab_not_the_sidebar():
-    # Each tab gets its own Run, beside the inputs it runs, so Run must never need
+def test_app_keeps_the_time_window_and_run_in_the_tabs_not_the_sidebar():
+    # How to run lives in each tab, beside the inputs it runs, so it never needs
     # to know which tab is active. The sidebar is for choosing a model only.
     at = AppTest.from_file(APP_SCRIPT)
     at.session_state["selected_model"] = "brusselator"
     at.run()
     assert not at.exception
 
-    time_course = at.tabs[0]
-    assert "Run simulation" in [b.label for b in time_course.button]
+    time_course, vary_multiple = at.tabs[0], at.tabs[3]
     assert {"Start time", "End time", "Number of points"} <= {
         n.label for n in time_course.number_input
     }
+    assert "Run simulation" in [b.label for b in vary_multiple.button]
     sidebar_buttons = [b.label for b in at.sidebar.button]
     assert "Use custom model" in sidebar_buttons  # proves the sidebar query sees things
     assert "Run simulation" not in sidebar_buttons
@@ -224,12 +273,12 @@ def test_app_a_failed_run_in_one_tab_leaves_every_other_tab_intact():
     st.cache_data.clear()
     at = AppTest.from_file(APP_SCRIPT)
     at.session_state["selected_model"] = "brusselator"
-    at.run()
 
     with mock.patch("simulations.run", side_effect=RuntimeError("boom")):
-        next(b for b in at.button if b.label == "Run simulation").click().run()
+        at.run()  # Time course runs on load, and fails
 
     assert not at.exception
+    assert any("complete the simulation" in e.value.lower() for e in at.tabs[0].error)
     for placeholder_tab in at.tabs[1:3]:
         assert any("coming soon" in c.value.lower() for c in placeholder_tab.caption)
     vary_multiple = at.tabs[3]
@@ -243,8 +292,7 @@ def test_app_keeps_each_tabs_results_to_itself():
     at.session_state["selected_model"] = "brusselator"
     at.run()
 
-    _number_input(at, "Number of points").set_value(20).run()  # Time course's
-    next(b for b in at.button if b.label == "Run simulation").click().run(timeout=60)
+    _number_input(at, "Number of points").set_value(20).run(timeout=60)  # Time course's
 
     assert not at.exception
     time_course, vary_multiple = at.tabs[0], at.tabs[3]
@@ -260,13 +308,9 @@ def test_app_keeps_the_raw_table_when_plotting_fails():
     st.cache_data.clear()
     at = AppTest.from_file(APP_SCRIPT)
     at.session_state["selected_model"] = "brusselator"
-    at.run()
-    assert not at.exception
-
-    _number_input(at, "Number of points").set_value(20).run()  # shrink the real run
 
     with mock.patch("plotting.kinetics_figure", side_effect=RuntimeError("bad fig")):
-        next(b for b in at.button if b.label == "Run simulation").click().run(timeout=60)
+        at.run(timeout=60)  # Time course runs on load; drawing its plot fails
 
     assert not at.exception
     assert any("raw data" in w.value.lower() for w in at.warning)
@@ -322,4 +366,4 @@ def test_app_shows_no_events_section_for_a_model_without_events():
 
     assert not at.exception
     assert not any("End time" in w.value for w in at.warning)
-    assert _result_tables(at) == []  # no events table, no results
+    assert not any(e.label == "Events in this model" for e in at.expander)

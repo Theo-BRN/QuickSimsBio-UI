@@ -439,56 +439,131 @@ def render_table_mode(tab: str, source: dict):
         render_results(tab, source)
 
 
+def _add_input(chosen_key: str, picker_key: str):
+    """Picker callback: add the picked input as a row, then clear the picker.
+
+    Callbacks run *before* the next script run — the one moment Streamlit lets code
+    reset a widget's own value (here, the picker back to empty).
+    """
+    name = st.session_state[picker_key]
+    if name and name not in st.session_state[chosen_key]:
+        st.session_state[chosen_key].append(name)
+    st.session_state[picker_key] = None
+
+
+def _remove_input(chosen_key: str, name: str, row_keys: list[str]):
+    """Remove-button callback: drop the row and forget its settings, so adding the
+    same input again starts back at its default."""
+    st.session_state[chosen_key].remove(name)
+    for key in row_keys:
+        st.session_state.pop(key, None)
+
+
+def render_input_row(model_key: str, chosen_key: str, name: str, default: float):
+    """One chosen input as a compact row: its control plus a ⋯ menu. Returns its value.
+
+    A non-zero default gets a fold-change slider (…, 0.5×, 1×, 2×, …), each stop
+    also showing the actual value. The ⋯ menu widens or narrows that range,
+    Desmos-style, and removes the row. A default of 0 has no scale to multiply,
+    so it gets a small number box instead. A horizontal container (not columns)
+    keeps the row together on a phone, where columns stack.
+    """
+    fold_key = f"{model_key}::fold::{name}"
+    range_key = f"{model_key}::range::{name}"
+    value_key = f"{model_key}::value::{name}"
+
+    with st.container(horizontal=True, vertical_alignment="bottom"):
+        if default != 0:
+            # The range slider sits in the ⋯ menu, drawn *after* this slider, so read
+            # its value from the previous run (the default on the first run).
+            low, high = st.session_state.get(range_key, simulations.DEFAULT_FOLD_RANGE)
+            options = simulations.fold_options(low, max(high, low * 10))
+            # Keep the slider on a valid stop if its range has just been changed.
+            current = st.session_state.get(fold_key, 1.0)
+            st.session_state[fold_key] = simulations.nearest_fold(options, current)
+            fold = st.select_slider(
+                name,
+                options=options,
+                format_func=lambda f: f"{f:g}× ({default * f:.3g})",
+                key=fold_key,
+                width="stretch",
+            )
+            value = default * fold
+        else:
+            st.session_state.setdefault(value_key, 0.0)
+            # "%g" keeps tiny and huge values readable (1e-12, not 0.00).
+            value = st.number_input(
+                name,
+                step=simulations.input_step(default),
+                format="%g",
+                key=value_key,
+                width=180,
+            )
+
+        with st.popover("", icon=":material/more_horiz:", key=f"{model_key}::menu::{name}"):
+            if default != 0:
+                # value= must be passed as a (low, high) pair: that's how Streamlit
+                # knows to draw a two-handled range slider rather than a single one.
+                st.select_slider(
+                    "Slider range",
+                    options=simulations.FOLD_BOUND_OPTIONS,
+                    value=simulations.DEFAULT_FOLD_RANGE,
+                    format_func=lambda f: f"{f:g}×",
+                    key=range_key,
+                )
+            st.button(
+                "Remove",
+                key=f"{model_key}::remove::{name}",
+                on_click=_remove_input,
+                args=(chosen_key, name, [fold_key, range_key, value_key]),
+            )
+    return value
+
+
 def render_time_course_mode(tab: str, source: dict):
     """Time course: change a few inputs, and everything else runs at its default.
 
-    Inputs are picked as "chips" in a type-to-search box (``st.multiselect``); each
-    chip reveals a value box, and removing a chip puts that input back to its
-    default. It starts with a newcomer's example (``simulations.example_inputs``).
-    Keys include the model, so switching model starts afresh.
+    An "Add an input…" picker adds inputs as compact rows (``render_input_row``),
+    starting from a newcomer's example (``simulations.example_inputs``). Keys
+    include the model, so switching model starts afresh.
+
+    There is no Run button: every change reruns the script, the request below is
+    refreshed each time, and ``run_cached`` only simulates when the inputs actually
+    changed — so the plot always matches what's on screen, a first visit shows a
+    result immediately, and number boxes update the moment you press Enter.
     """
     defaults = get_inputs_cached(source["kind"], source["ref"])
     kinds = get_input_kinds_cached(source["kind"], source["ref"])
     model_key = f"{tab}::{source['kind']}::{source['ref']}"
+    chosen_key = f"{model_key}::chosen"
+    picker_key = f"{model_key}::picker"
+    st.session_state.setdefault(chosen_key, simulations.example_inputs(kinds))
+    chosen = st.session_state[chosen_key]
 
     col_inputs, col_outputs = st.columns(2, gap="large")
 
     with col_inputs:
-        st.subheader("Inputs")
-        chosen = st.multiselect(
-            "Change inputs",
-            options=list(defaults),
-            default=simulations.example_inputs(kinds),
+        st.selectbox(
+            "Add an input",
+            options=[name for name in defaults if name not in chosen],
+            index=None,
+            placeholder="Add an input…",
             format_func=lambda name: f"{name} · {kinds[name]}",
-            placeholder="Type to find an input…",
-            key=f"{model_key}::chips",
+            label_visibility="collapsed",
+            key=picker_key,
+            on_change=_add_input,
+            args=(chosen_key, picker_key),
         )
-        changed = {}
-        for name in chosen:
-            # "%g" keeps tiny and huge values readable (1e-12, not 0.00), and the
-            # +/− step scales with the value rather than a fixed 0.01.
-            changed[name] = st.number_input(
-                name,
-                value=defaults[name],
-                step=simulations.input_step(defaults[name]),
-                format="%g",
-                key=f"{model_key}::value::{name}",
-            )
-        st.caption("Everything else runs at the model's default.")
+        changed = {
+            name: render_input_row(model_key, chosen_key, name, defaults[name])
+            for name in chosen
+        }
         scan_dict = simulations.build_scan_dict_from_values(defaults, changed)
 
         start, end, n_points, time_error = render_time_window(tab)
         render_events_panel(tab, source, end)
 
-        # On click, only stash this tab's request; render_results draws from it on
-        # every rerun (see render_table_mode for why).
-        if st.button(
-            "Run simulation",
-            type="primary",
-            width="stretch",
-            key=f"{tab}::run",
-            disabled=bool(time_error),
-        ):
+        if not time_error:
             st.session_state[f"last_run::{tab}"] = {
                 "kind": source["kind"],
                 "ref": source["ref"],
@@ -498,7 +573,6 @@ def render_time_course_mode(tab: str, source: dict):
             }
 
     with col_outputs:
-        st.subheader("Outputs")
         render_results(tab, source)
 
 

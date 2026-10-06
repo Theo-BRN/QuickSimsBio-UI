@@ -140,6 +140,36 @@ def test_example_inputs_of_a_large_single_kind_model_shows_just_the_first_few():
     assert simulations.example_inputs(kinds) == ["S0", "S1", "S2"]
 
 
+# --- fold_options / nearest_fold ----------------------------------------------
+def test_fold_options_steps_one_two_five_through_the_default_range():
+    assert simulations.fold_options(*simulations.DEFAULT_FOLD_RANGE) == [
+        0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0
+    ]
+
+
+def test_fold_options_are_exact_round_numbers():
+    # Built from strings, so no 0.020000000000000004-style float noise.
+    assert 0.02 in simulations.fold_options(0.01, 1)
+    assert 0.0005 in simulations.fold_options(1e-4, 1e-3)
+
+
+def test_fold_options_respect_a_narrowed_range():
+    assert simulations.fold_options(0.5, 20) == [0.5, 1.0, 2.0, 5.0, 10.0, 20.0]
+
+
+def test_every_bound_option_is_on_the_scale():
+    bounds = simulations.FOLD_BOUND_OPTIONS
+    assert bounds[0] == 1e-4 and bounds[-1] == 1e4
+    assert set(simulations.fold_options(*simulations.DEFAULT_FOLD_RANGE)) <= set(bounds)
+
+
+def test_nearest_fold_measures_distance_on_a_log_scale():
+    options = [0.1, 1.0, 10.0]
+    assert simulations.nearest_fold(options, 3.0) == 1.0  # 3 is nearer 1 than 10 in ratio terms
+    assert simulations.nearest_fold(options, 4.0) == 10.0
+    assert simulations.nearest_fold(options, 1.0) == 1.0
+
+
 # --- input_step ---------------------------------------------------------------
 @pytest.mark.parametrize(
     "default, step",

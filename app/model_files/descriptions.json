@@ -7,7 +7,6 @@
   "YeastGlycolysis": "Yeast glycolysis (Pritchard & Kell, 2002), simulating a fall in external glucose.",
   "NF-kappaB": "Oscillations in NF-κB signalling (Nelson et al., 2004).",
   "CircadianClock": "The fruit-fly circadian clock, driven by the PER and TIM genes (Leloup & Goldbeter, 1999).",
-  "array_1d": "Calcium oscillations (Kummer et al., 2000), repeated across a row of 20 compartments.",
   "turing_base": "Turing patterns: a two-species reaction–diffusion example.",
   "Cubic Ternary Complex Activation": "A GPCR model incorporating ligand binding, receptor activation, G protein binding and G protein activation."
 }
