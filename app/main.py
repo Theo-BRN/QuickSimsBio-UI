@@ -482,10 +482,7 @@ st.sidebar.success(f"Loaded **{choice}**.")
 description = models.MODEL_DESCRIPTIONS.get(choice)
 model_line = f"**{choice}** — {description}" if description else f"**{choice}**"
 if choice == models.DEFAULT_MODEL:
-    model_line += (
-        "  \nThis is the default model. Choose another in the sidebar — on a phone, "
-        "tap the arrow at the top of the screen to open it."
-    )
+    model_line += "  \nThis is the default model. To choose another, use the sidebar."
 st.caption(model_line)
 
 # --- Analysis tabs ------------------------------------------------------------
