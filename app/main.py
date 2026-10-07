@@ -8,7 +8,6 @@ Streamlit re-runs this whole script top-to-bottom on every interaction, so the
 expensive work (listing examples, loading a model) is wrapped in caches below.
 """
 
-from math import prod
 from pathlib import Path
 
 # app/ is on sys.path when Streamlit runs this file, so sibling modules import
@@ -337,6 +336,8 @@ def render_results(tab: str, source: dict):
             plot_type = st.radio(
                 "Plot type",
                 plotting.PLOT_TYPES,
+                # Only the label changes: "area" stacks its series, so say so.
+                format_func=lambda kind: "stacked area" if kind == "area" else kind,
                 horizontal=True,
                 key=f"{tab}::plot_type",
             )
@@ -395,103 +396,6 @@ def render_results(tab: str, source: dict):
 
     with st.expander("Raw results table", key=f"{tab}::raw"):
         st.dataframe(wide, width="stretch", key=f"{tab}::raw_results")
-
-
-def render_table_mode(tab: str, source: dict):
-    """A whole tab driven by the general inputs table: Inputs | Outputs.
-
-    Inputs are an editable table: every input starts as "Single" at its model
-    default, and the Type column decides what each row means. All the
-    parsing/validation lives in simulations.py so it stays testable. The editor's
-    key includes the tab and the model, so switching models starts a fresh editor
-    and two tabs never share one.
-
-    Layout (shared with Time course): inputs in a narrow left column; the time
-    window and events sit above the plot in the wider right column, because they
-    decide what the plot's x-axis shows.
-    """
-    col_inputs, col_outputs = st.columns([1, 2], gap="large")
-
-    # Filled first because the Run button below needs the times. A column's place
-    # on screen is fixed when st.columns() creates it, not by the fill order.
-    with col_outputs:
-        start, end, n_points, time_error = render_time_window(tab)
-        render_events_panel(tab, source, end)
-
-    with col_inputs:
-        default_table = simulations.default_input_table(
-            get_inputs_cached(source["kind"], source["ref"])
-        )
-        edited = st.data_editor(
-            default_table,
-            key=f"input_editor::{tab}::{source['kind']}::{source['ref']}",
-            hide_index=True,
-            width="stretch",
-            column_config={
-                simulations.COL_PARAM: st.column_config.TextColumn(
-                    "Input", disabled=True
-                ),
-                simulations.COL_VALUE: st.column_config.NumberColumn(
-                    "Value", help="Used when Type is Single."
-                ),
-                simulations.COL_LOWER: st.column_config.NumberColumn(
-                    "Lower", help="Grid lower bound."
-                ),
-                simulations.COL_UPPER: st.column_config.NumberColumn(
-                    "Upper", help="Grid upper bound."
-                ),
-                simulations.COL_TYPE: st.column_config.SelectboxColumn(
-                    "Type",
-                    options=simulations.INPUT_TYPES,
-                    required=True,
-                    help="Single = fixed value · Grid = sweep Lower→Upper.",
-                ),
-                simulations.COL_SCALE: st.column_config.SelectboxColumn(
-                    "Scale",
-                    options=simulations.INPUT_SCALES,
-                    required=True,
-                    help="Linear or logarithmic spacing for a Grid scan.",
-                ),
-                simulations.COL_N: st.column_config.NumberColumn(
-                    "n", step=1, help="Number of grid points."
-                ),
-            },
-        )
-        scan_dict, input_errors = simulations.build_scan_dict_from_table(edited)
-
-        if input_errors:
-            for name, message in input_errors.items():
-                st.error(f"**{name}**: {message}")
-        else:
-            n_sims = prod(len(values) for values in scan_dict.values())
-            st.caption(
-                f"This will run {n_sims} simulation{'s' if n_sims != 1 else ''}."
-            )
-
-        # Streamlit re-runs this whole script on *every* widget change. If we
-        # rendered results inside the `if clicked:` block, the plot would vanish
-        # the moment the user touched a plot control (that rerun has clicked ==
-        # False). So on click we only stash this tab's *request* in session_state;
-        # render_results draws from it on every rerun, and run_cached makes that
-        # free. The button sits beside the inputs it runs, so it never needs to
-        # know which tab is active.
-        if st.button(
-            "Run simulation",
-            type="primary",
-            width="stretch",
-            key=f"{tab}::run",
-            disabled=bool(input_errors) or bool(time_error),
-        ):
-            st.session_state[f"last_run::{tab}"] = {
-                "kind": source["kind"],
-                "ref": source["ref"],
-                "scan_dict": scan_dict,
-                "timepoints": simulations.make_timepoints(start, end, int(n_points)),
-                "scales": simulations.input_scales_from_table(edited),
-            }
-
-    with col_outputs:
-        render_results(tab, source)
 
 
 def _add_input(chosen_key: str, picker_key: str):
@@ -603,8 +507,10 @@ def render_time_course_mode(tab: str, source: dict):
     st.session_state.setdefault(chosen_key, simulations.example_inputs(kinds))
     chosen = st.session_state[chosen_key]
 
-    # Same layout as render_table_mode: narrow inputs, wide results with the time
-    # window above the plot (filled first, since the request below needs it).
+    # Narrow inputs, wide results with the time window above the plot — it decides
+    # the plot's x-axis. That column's top is filled first because the request
+    # below needs the times; a column's place on screen is fixed when st.columns()
+    # creates it, not by the order it's filled in.
     col_inputs, col_outputs = st.columns([1, 2], gap="large")
 
     with col_outputs:
@@ -710,15 +616,10 @@ if choice == models.DEFAULT_MODEL:
     )
 st.caption(model_line)
 
-# --- Analysis tabs ------------------------------------------------------------
-# Time course explores one input at a time with sliders; Vary multiple inputs
-# scans several at once, and its plot adapts to how many vary (plotting.mode).
-# Tab bodies never call st.stop() (see render_results), so the order they are
-# filled in doesn't matter.
-tab_time, tab_multi = st.tabs(["Time course", "Vary multiple inputs"])
-
-with tab_time:
-    render_time_course_mode("time_course", source)
-
-with tab_multi:
-    render_table_mode("vary_multiple", source)
+# --- Time course --------------------------------------------------------------
+# One view, no tabs (7 Oct): the "Vary multiple inputs" tab was removed so a
+# visitor meets one clear experience. Scanning will return as a mode *within*
+# Time course — see "★ The final version" in docs/TODO.md. The scan backend
+# (simulations.build_scan_dict_from_table, plotting's vs-input and scatter
+# figures, and render_results' scan branches) is kept for that.
+render_time_course_mode("time_course", source)
