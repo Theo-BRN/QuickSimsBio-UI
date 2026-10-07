@@ -244,6 +244,52 @@ def render_events_panel(tab: str, source: dict, end_time: float):
             )
 
 
+def _toggle_output(hidden_key: str, output: str):
+    """Legend-button callback: hide the output if shown, show it if hidden."""
+    hidden = st.session_state[hidden_key]
+    if output in hidden:
+        hidden.remove(output)
+    else:
+        hidden.add(output)
+
+
+def render_legend(tab: str, hidden_key: str, outputs: list[str]):
+    """The app's own legend: one button per output, in its line's colour.
+
+    Clicking an entry hides or shows that output. This replaces Plotly's legend,
+    whose clicks can't be remembered here: Streamlit identifies a chart by its full
+    contents, so new data (a slider move) means a brand-new chart and Plotly's
+    legend and zoom state are lost. Which outputs are hidden lives in our own
+    state instead (the set at ``hidden_key``, one per model), so it survives every
+    redraw — and because the plot reads that set too, the legend can be drawn
+    *under* the plot.
+
+    Colouring: each button sits in a container whose key Streamlit turns into the
+    CSS class ``st-key-<key>`` (documented behaviour), which the stylesheet below
+    targets with that output's exact colour (see ``plotting.legend_entry_css``).
+    """
+    hidden = st.session_state[hidden_key]
+    colours = plotting.colour_map(outputs)
+
+    css = []
+    with st.container(horizontal=True, gap="small"):
+        for i, output in enumerate(outputs):
+            box_key = f"{tab}-legend-{i}"
+            with st.container(key=box_key, width="content"):
+                st.button(
+                    output,
+                    key=f"{tab}::legend::{i}",
+                    on_click=_toggle_output,
+                    args=(hidden_key, output),
+                )
+            css.append(
+                plotting.legend_entry_css(
+                    f"st-key-{box_key}", colours[output], shown=output not in hidden
+                )
+            )
+    st.html(f"<style>{' '.join(css)}</style>")
+
+
 def render_results(tab: str, source: dict):
     """This tab's latest results, from the run request the tab stored.
 
@@ -294,16 +340,25 @@ def render_results(tab: str, source: dict):
                 horizontal=True,
                 key=f"{tab}::plot_type",
             )
+            outputs = long[plotting.COL_OUTPUT_TYPE].unique().tolist()
+            hidden_key = f"{tab}::hidden::{last_run['kind']}::{last_run['ref']}"
+            hidden = st.session_state.setdefault(hidden_key, set())
+            shown = [output for output in outputs if output not in hidden]
             if mode == plotting.MODE_KINETICS:
-                fig = plotting.kinetics_figure(long, plot_type=plot_type)
+                fig = plotting.kinetics_figure(long, plot_type=plot_type, shown=shown)
             else:
                 fig = plotting.vs_input_figure(
                     long,
                     last_run["scan_dict"],
                     last_run["scales"],
                     plot_type=plot_type,
+                    shown=shown,
                 )
+            # Our legend (under the plot) replaces Plotly's; a little extra height
+            # now the plot has two-thirds of the width.
+            fig.update_layout(showlegend=False, height=500)
             st.plotly_chart(fig, width="stretch", key=f"{tab}::plot")
+            render_legend(tab, hidden_key, outputs)
         else:
             # 2+ scanned inputs: a scatter of one output (colour, or z+colour in
             # 3-D) over two chosen inputs. These pickers live outside the Run
@@ -321,19 +376,16 @@ def render_results(tab: str, source: dict):
                 "Y axis", varying, index=1, key=f"{tab}::scatter_y"
             )
             three_d = st.toggle("3-D view", key=f"{tab}::scatter_3d")
-            st.plotly_chart(
-                plotting.scatter_figure(
-                    long,
-                    last_run["scan_dict"],
-                    last_run["scales"],
-                    x_input,
-                    y_input,
-                    output_type,
-                    three_d=three_d,
-                ),
-                width="stretch",
-                key=f"{tab}::plot",
+            fig = plotting.scatter_figure(
+                long,
+                last_run["scan_dict"],
+                last_run["scales"],
+                x_input,
+                y_input,
+                output_type,
+                three_d=three_d,
             )
+            st.plotly_chart(fig, width="stretch", key=f"{tab}::plot")
     except Exception as exc:  # broad on purpose: keep the data, explain the plot
         st.warning(
             "Couldn't draw a plot for this result — here's the raw data instead."
@@ -354,12 +406,19 @@ def render_table_mode(tab: str, source: dict):
     key includes the tab and the model, so switching models starts a fresh editor
     and two tabs never share one.
 
-    Splitting into columns puts the plot beside the controls that shape it.
+    Layout (shared with Time course): inputs in a narrow left column; the time
+    window and events sit above the plot in the wider right column, because they
+    decide what the plot's x-axis shows.
     """
-    col_inputs, col_outputs = st.columns(2, gap="large")
+    col_inputs, col_outputs = st.columns([1, 2], gap="large")
+
+    # Filled first because the Run button below needs the times. A column's place
+    # on screen is fixed when st.columns() creates it, not by the fill order.
+    with col_outputs:
+        start, end, n_points, time_error = render_time_window(tab)
+        render_events_panel(tab, source, end)
 
     with col_inputs:
-        st.subheader("Inputs")
         default_table = simulations.default_input_table(
             get_inputs_cached(source["kind"], source["ref"])
         )
@@ -409,9 +468,6 @@ def render_table_mode(tab: str, source: dict):
                 f"This will run {n_sims} simulation{'s' if n_sims != 1 else ''}."
             )
 
-        start, end, n_points, time_error = render_time_window(tab)
-        render_events_panel(tab, source, end)
-
         # Streamlit re-runs this whole script on *every* widget change. If we
         # rendered results inside the `if clicked:` block, the plot would vanish
         # the moment the user touched a plot control (that rerun has clicked ==
@@ -435,7 +491,6 @@ def render_table_mode(tab: str, source: dict):
             }
 
     with col_outputs:
-        st.subheader("Outputs")
         render_results(tab, source)
 
 
@@ -459,64 +514,72 @@ def _remove_input(chosen_key: str, name: str, row_keys: list[str]):
         st.session_state.pop(key, None)
 
 
-def render_input_row(model_key: str, chosen_key: str, name: str, default: float):
-    """One chosen input as a compact row: its control plus a ⋯ menu. Returns its value.
+def _slider_settings(keys: dict, default: float) -> tuple[dict, str]:
+    """This row's slider settings, checked. Returns (settings, problem message or "").
 
-    A non-zero default gets a fold-change slider (…, 0.5×, 1×, 2×, …), each stop
-    also showing the actual value. The ⋯ menu widens or narrows that range,
-    Desmos-style, and removes the row. A default of 0 has no scale to multiply,
-    so it gets a small number box instead. A horizontal container (not columns)
-    keeps the row together on a phone, where columns stack.
+    The settings widgets sit in the ⚙ panel, drawn *after* the slider, so their
+    values are read from the previous run — the defaults on the first run. The
+    checking itself lives in simulations.check_slider_settings, where it's tested.
     """
-    fold_key = f"{model_key}::fold::{name}"
-    range_key = f"{model_key}::range::{name}"
-    value_key = f"{model_key}::value::{name}"
+    base = simulations.default_slider_settings(default)
+    settings = {
+        field: st.session_state.get(keys[field], base[field])
+        for field in ("min", "max", "log")
+    }
+    return simulations.check_slider_settings(settings, default)
+
+
+def render_input_row(
+    model_key: str, chosen_key: str, name: str, default: float, kind: str
+):
+    """One chosen input as a compact row: [slider] [⚙] [×]. Returns its value.
+
+    The slider moves through real values: by default 1/100 to 100× the default on
+    a log scale, or a linear 0 – 1 for an input that starts at 0 (nothing to base
+    a range on, so the user widens it). ⚙ sets Min, Max and Log scale; × removes
+    the row. A horizontal container (not columns) keeps the row together on a
+    phone, where columns stack.
+    """
+    keys = {
+        field: f"{model_key}::{field}::{name}"
+        for field in ("value", "min", "max", "log")
+    }
+    label = (
+        f"{name} (initial concentration)" if kind == simulations.KIND_SPECIES else name
+    )
 
     with st.container(horizontal=True, vertical_alignment="bottom"):
-        if default != 0:
-            # The range slider sits in the ⋯ menu, drawn *after* this slider, so read
-            # its value from the previous run (the default on the first run).
-            low, high = st.session_state.get(range_key, simulations.DEFAULT_FOLD_RANGE)
-            options = simulations.fold_options(low, max(high, low * 10))
-            # Keep the slider on a valid stop if its range has just been changed.
-            current = st.session_state.get(fold_key, 1.0)
-            st.session_state[fold_key] = simulations.nearest_fold(options, current)
-            fold = st.select_slider(
-                name,
-                options=options,
-                format_func=lambda f: f"{f:g}× ({default * f:.3g})",
-                key=fold_key,
-                width="stretch",
-            )
-            value = default * fold
-        else:
-            st.session_state.setdefault(value_key, 0.0)
-            # "%g" keeps tiny and huge values readable (1e-12, not 0.00).
-            value = st.number_input(
-                name,
-                step=simulations.input_step(default),
-                format="%g",
-                key=value_key,
-                width=180,
-            )
+        settings, problem = _slider_settings(keys, default)
+        options = simulations.slider_options(settings, default)
+        # Keep the slider on a valid stop if its settings have just changed.
+        current = st.session_state.get(keys["value"], default)
+        st.session_state[keys["value"]] = simulations.nearest_option(
+            options, current, settings["log"]
+        )
+        value = st.select_slider(
+            label,
+            options=options,
+            format_func=lambda v: f"{v:.3g}",
+            key=keys["value"],
+            width="stretch",
+        )
 
-        with st.popover("", icon=":material/more_horiz:", key=f"{model_key}::menu::{name}"):
-            if default != 0:
-                # value= must be passed as a (low, high) pair: that's how Streamlit
-                # knows to draw a two-handled range slider rather than a single one.
-                st.select_slider(
-                    "Slider range",
-                    options=simulations.FOLD_BOUND_OPTIONS,
-                    value=simulations.DEFAULT_FOLD_RANGE,
-                    format_func=lambda f: f"{f:g}×",
-                    key=range_key,
-                )
-            st.button(
-                "Remove",
-                key=f"{model_key}::remove::{name}",
-                on_click=_remove_input,
-                args=(chosen_key, name, [fold_key, range_key, value_key]),
-            )
+        base = simulations.default_slider_settings(default)
+        with st.popover("", icon=":material/tune:", help="Slider settings"):
+            st.number_input("Min", value=base["min"], format="%g", key=keys["min"])
+            st.number_input("Max", value=base["max"], format="%g", key=keys["max"])
+            st.toggle("Log scale", value=base["log"], key=keys["log"])
+            if problem:
+                st.caption(problem)
+
+        st.button(
+            "",
+            icon=":material/close:",
+            help="Remove",
+            key=f"{model_key}::remove::{name}",
+            on_click=_remove_input,
+            args=(chosen_key, name, list(keys.values())),
+        )
     return value
 
 
@@ -540,7 +603,13 @@ def render_time_course_mode(tab: str, source: dict):
     st.session_state.setdefault(chosen_key, simulations.example_inputs(kinds))
     chosen = st.session_state[chosen_key]
 
-    col_inputs, col_outputs = st.columns(2, gap="large")
+    # Same layout as render_table_mode: narrow inputs, wide results with the time
+    # window above the plot (filled first, since the request below needs it).
+    col_inputs, col_outputs = st.columns([1, 2], gap="large")
+
+    with col_outputs:
+        start, end, n_points, time_error = render_time_window(tab)
+        render_events_panel(tab, source, end)
 
     with col_inputs:
         st.selectbox(
@@ -548,20 +617,26 @@ def render_time_course_mode(tab: str, source: dict):
             options=[name for name in defaults if name not in chosen],
             index=None,
             placeholder="Add an input…",
-            format_func=lambda name: f"{name} · {kinds[name]}",
+            format_func=lambda name: (
+                f"{name} · "
+                + (
+                    "initial concentration"
+                    if kinds[name] == simulations.KIND_SPECIES
+                    else "parameter"
+                )
+            ),
             label_visibility="collapsed",
             key=picker_key,
             on_change=_add_input,
             args=(chosen_key, picker_key),
         )
         changed = {
-            name: render_input_row(model_key, chosen_key, name, defaults[name])
+            name: render_input_row(
+                model_key, chosen_key, name, defaults[name], kinds[name]
+            )
             for name in chosen
         }
         scan_dict = simulations.build_scan_dict_from_values(defaults, changed)
-
-        start, end, n_points, time_error = render_time_window(tab)
-        render_events_panel(tab, source, end)
 
         if not time_error:
             st.session_state[f"last_run::{tab}"] = {
@@ -636,26 +711,14 @@ if choice == models.DEFAULT_MODEL:
 st.caption(model_line)
 
 # --- Analysis tabs ------------------------------------------------------------
-# One tab per analysis mode, mirroring the 0-D / 1-D / 2-D / n-D structure that
-# plotting.mode already implements. Tab bodies never call st.stop() (see
-# render_results), so the order they are filled in doesn't matter.
-tab_time, tab_single, tab_two, tab_multi = st.tabs(
-    ["Time course", "Vary single input", "Vary two inputs", "Vary multiple inputs"]
-)
+# Time course explores one input at a time with sliders; Vary multiple inputs
+# scans several at once, and its plot adapts to how many vary (plotting.mode).
+# Tab bodies never call st.stop() (see render_results), so the order they are
+# filled in doesn't matter.
+tab_time, tab_multi = st.tabs(["Time course", "Vary multiple inputs"])
 
 with tab_time:
     render_time_course_mode("time_course", source)
-
-with tab_single:
-    st.caption(
-        "Coming soon — vary one input across a range and see how each output responds."
-    )
-
-with tab_two:
-    st.caption(
-        "Coming soon — vary two inputs together and see how an output changes "
-        "across both."
-    )
 
 with tab_multi:
     render_table_mode("vary_multiple", source)

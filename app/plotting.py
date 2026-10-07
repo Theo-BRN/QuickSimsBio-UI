@@ -26,7 +26,7 @@ import plotly.express as px
 # columns; every *other* column in a long frame is a varied-input column.
 COL_TIME = "Time"
 COL_OUTPUT_TYPE = "Model_Output_Type"  # which output/species, e.g. "[X]"
-COL_OUTPUT = "Model_Output"            # the numeric value
+COL_OUTPUT = "Model_Output"  # the numeric value
 RESERVED = {COL_TIME, COL_OUTPUT_TYPE, COL_OUTPUT}
 
 # The three ways to draw a kinetics / vs-input plot (a UI toggle picks one).
@@ -39,21 +39,41 @@ SCALE_LOG = "Log"
 
 # The three simulation "modes", chosen by how many inputs were scanned. Each maps
 # to one figure builder (see ``mode`` and the builders below).
-MODE_KINETICS = "kinetics"    # 0 varying -> kinetics_figure
-MODE_VS_INPUT = "vs_input"    # 1 varying -> vs_input_figure
-MODE_SCATTER = "scatter"      # 2+ varying -> scatter_figure
+MODE_KINETICS = "kinetics"  # 0 varying -> kinetics_figure
+MODE_VS_INPUT = "vs_input"  # 1 varying -> vs_input_figure
+MODE_SCATTER = "scatter"  # 2+ varying -> scatter_figure
 
 # Palette + symbols carried over from the design doc
 # (Detecting results shape from input shape.md). A fixed, high-contrast order so a
 # given species keeps the same colour across the different plot types.
 CUSTOM_COLOURS = [
-    "#0000FF", "#FF0000", "#00C000", "#AD07E3", "#FF8000", "#000000",
-    "#94641F", "#000080", "#610051", "#A00000", "#005A00", "#F2B77C",
-    "#00FF00", "#90BFF9", "#C0C0FF", "#606060", "#FFFF00", "#C06000",
+    "#0000FF",
+    "#FF0000",
+    "#00C000",
+    "#AD07E3",
+    "#FF8000",
+    "#000000",
+    "#94641F",
+    "#000080",
+    "#610051",
+    "#A00000",
+    "#005A00",
+    "#F2B77C",
+    "#00FF00",
+    "#90BFF9",
+    "#C0C0FF",
+    "#606060",
+    "#FFFF00",
+    "#C06000",
     "#D4D4D4",
 ]
 CUSTOM_SYMBOLS = [
-    "circle", "square", "pentagon", "diamond", "cross", "star-square",
+    "circle",
+    "square",
+    "pentagon",
+    "diamond",
+    "cross",
+    "star-square",
     "diamond-wide",
 ]
 
@@ -160,42 +180,134 @@ def column_for_input(long_df, scan_dict: dict, name: str) -> str:
 
 
 # --- Figure builders (pure; long frame -> plotly Figure) ----------------------
-def _series_figure(df, x: str, plot_type: str, *, log_x: bool = False):
+def colour_map(outputs: list[str]) -> dict[str, str]:
+    """Each output's colour, by *name*, from the model's full list of outputs.
+
+    Colouring by name (not by position in the plotted data) keeps a species'
+    colour fixed when others are hidden, and the same across line, scatter and
+    area plots. More outputs than colours wrap around the palette.
+    """
+    return {
+        output: CUSTOM_COLOURS[i % len(CUSTOM_COLOURS)]
+        for i, output in enumerate(outputs)
+    }
+
+
+def value_labels(outputs) -> dict[str, str]:
+    """Plain names for the value and series columns, for axes and hover text.
+
+    COPASI writes a species' concentration as "[name]". When every output is one,
+    say so ("Species concentration", "Species"); anything else gets a neutral name
+    rather than a wrong one.
+    """
+    names = [str(name) for name in outputs]
+    if names and all(name.startswith("[") and name.endswith("]") for name in names):
+        return {COL_OUTPUT: "Species concentration", COL_OUTPUT_TYPE: "Species"}
+    return {COL_OUTPUT: "Output value", COL_OUTPUT_TYPE: "Output"}
+
+
+def text_colour_on(background: str) -> str:
+    """Black or white text, whichever reads better on ``background`` ("#RRGGBB").
+
+    Uses the WCAG relative-luminance formula. Above 0.179, black text has more
+    contrast than white, so light fills (yellow, light grey, pale blue) get black
+    text and dark fills get white.
+    """
+
+    def linear(channel: float) -> float:
+        return (
+            channel / 12.92
+            if channel <= 0.03928
+            else ((channel + 0.055) / 1.055) ** 2.4
+        )
+
+    r, g, b = (int(background[i : i + 2], 16) / 255 for i in (1, 3, 5))
+    luminance = 0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b)
+    return "#000000" if luminance > 0.179 else "#FFFFFF"
+
+
+def legend_entry_css(css_class: str, colour: str, shown: bool) -> str:
+    """CSS for one entry of the app's own legend (a button inside ``css_class``).
+
+    Shown: filled with its line's colour, like a legend swatch. Hidden: a faded
+    dashed outline, the way Plotly greys out a hidden trace. Hover and focus get
+    the same look, so the colours don't flicker to the theme's when clicked. Kept
+    small (about the size of the plot's other labels) so it reads as a legend
+    rather than a bank of buttons.
+    """
+    target = ", ".join(
+        f".{css_class} button{state}" for state in ("", ":hover", ":focus", ":active")
+    )
+    size = "min-height: 0; padding: 0.05rem 0.5rem; border-radius: 0.4rem;"
+    if shown:
+        style = (
+            f"background: {colour}; border: 1px solid {colour}; "
+            f"color: {text_colour_on(colour)}; {size}"
+        )
+    else:
+        style = (
+            f"background: transparent; border: 1px dashed {colour}; "
+            f"color: {colour}; opacity: 0.55; {size}"
+        )
+    return (
+        f"{target} {{ {style} }} "
+        f".{css_class} button p {{ color: inherit; font-size: 0.8rem; }}"
+    )
+
+
+def _series_figure(
+    df, x: str, plot_type: str, *, log_x: bool = False, shown: list[str] | None = None
+):
     """Shared line/scatter/area builder: ``Model_Output`` vs ``x``, per species.
 
     Backs both the 0-D kinetics plot (``x = Time``) and the 1-D vs-input plot
     (``x`` = the scanned input's column). Colour = ``Model_Output_Type`` so each
-    species is one series.
+    species is one series. ``shown`` limits which species are drawn (``None`` =
+    all); colours come from ``colour_map`` over *all* species, so hiding one never
+    recolours the rest.
 
     The **area** case needs a tweak: ``px.area`` stacks the first category at the
     *bottom* but lists it at the *top* of the legend, so legend order reads upside
-    down versus the stack. We reverse both the category order and the colour list
-    so the legend's top matches the stack's top (the doc's fix).
+    down versus the stack. Reversing the category order fixes that; colours follow
+    names, so they need no reversing.
     """
     drawers = {"line": px.line, "scatter": px.scatter, "area": px.area}
     if plot_type not in drawers:
         raise ValueError(f"plot_type must be one of {PLOT_TYPES}, got {plot_type!r}.")
 
-    common = dict(
-        x=x, y=COL_OUTPUT, color=COL_OUTPUT_TYPE, template="plotly_white", log_x=log_x
+    outputs = df[COL_OUTPUT_TYPE].unique().tolist()
+    colours = colour_map(outputs)
+    labels = value_labels(outputs)
+    if shown is not None:
+        df = df[df[COL_OUTPUT_TYPE].isin(shown)]
+        outputs = [output for output in outputs if output in shown]
+
+    order = list(reversed(outputs)) if plot_type == "area" else outputs
+    return drawers[plot_type](
+        df,
+        x=x,
+        y=COL_OUTPUT,
+        color=COL_OUTPUT_TYPE,
+        color_discrete_map=colours,
+        category_orders={COL_OUTPUT_TYPE: order},
+        labels=labels,
+        template="plotly_white",
+        log_x=log_x,
     )
-    if plot_type == "area":
-        order = list(reversed(df[COL_OUTPUT_TYPE].unique().tolist()))
-        return px.area(
-            df,
-            category_orders={COL_OUTPUT_TYPE: order},
-            color_discrete_sequence=list(reversed(CUSTOM_COLOURS)),
-            **common,
-        )
-    return drawers[plot_type](df, color_discrete_sequence=CUSTOM_COLOURS, **common)
 
 
-def kinetics_figure(long_df, plot_type: str = "line"):
-    """0-D: every output species vs time (a kinetics trace)."""
-    return _series_figure(long_df, COL_TIME, plot_type)
+def kinetics_figure(long_df, plot_type: str = "line", shown: list[str] | None = None):
+    """0-D: output species vs time (a kinetics trace); ``shown`` limits which."""
+    return _series_figure(long_df, COL_TIME, plot_type, shown=shown)
 
 
-def vs_input_figure(long_df, scan_dict: dict, scales: dict, plot_type: str = "line"):
+def vs_input_figure(
+    long_df,
+    scan_dict: dict,
+    scales: dict,
+    plot_type: str = "line",
+    shown: list[str] | None = None,
+):
     """1-D: an output summary vs the single scanned input.
 
     Reduces each trace to its final timepoint (one value per input value x
@@ -207,13 +319,19 @@ def vs_input_figure(long_df, scan_dict: dict, scales: dict, plot_type: str = "li
     xcol = column_for_input(long_df, scan_dict, name)
     reduced = reduce_final_timepoint(long_df)
     return _series_figure(
-        reduced, xcol, plot_type, log_x=scales.get(name) == SCALE_LOG
+        reduced, xcol, plot_type, log_x=scales.get(name) == SCALE_LOG, shown=shown
     )
 
 
 def scatter_figure(
-    long_df, scan_dict: dict, scales: dict, x_input: str, y_input: str,
-    output_type: str, *, three_d: bool = False,
+    long_df,
+    scan_dict: dict,
+    scales: dict,
+    x_input: str,
+    y_input: str,
+    output_type: str,
+    *,
+    three_d: bool = False,
 ):
     """2-D / n-D: one output across two scanned inputs.
 
@@ -232,6 +350,7 @@ def scatter_figure(
         x=column_for_input(long_df, scan_dict, x_input),
         y=column_for_input(long_df, scan_dict, y_input),
         color=COL_OUTPUT,
+        labels=value_labels([output_type]),
         template="plotly_white",
         log_x=scales.get(x_input) == SCALE_LOG,
         log_y=scales.get(y_input) == SCALE_LOG,

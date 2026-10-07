@@ -12,7 +12,6 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
-
 import simulations
 
 
@@ -26,13 +25,24 @@ def stub_model_state(monkeypatch, stub_parameter_sets):
     are appended to.
     """
     restored: list[tuple[str, dict]] = []
-    monkeypatch.setattr(simulations.bsc, "set_species", lambda **kw: restored.append(("species", kw)))
-    monkeypatch.setattr(simulations.bsc, "set_parameters", lambda **kw: restored.append(("params", kw)))
+    monkeypatch.setattr(
+        simulations.bsc, "set_species", lambda **kw: restored.append(("species", kw))
+    )
+    monkeypatch.setattr(
+        simulations.bsc, "set_parameters", lambda **kw: restored.append(("params", kw))
+    )
     return restored
 
 
-def _row(param, value=np.nan, lower=np.nan, upper=np.nan,
-         type_=simulations.TYPE_SINGLE, scale=simulations.SCALE_LINEAR, n=np.nan):
+def _row(
+    param,
+    value=np.nan,
+    lower=np.nan,
+    upper=np.nan,
+    type_=simulations.TYPE_SINGLE,
+    scale=simulations.SCALE_LINEAR,
+    n=np.nan,
+):
     """Build one inputs-table row dict with every column set."""
     return {
         simulations.COL_PARAM: param,
@@ -73,7 +83,9 @@ def stub_parameter_sets(monkeypatch):
 
     monkeypatch.setattr(simulations.bsc, "get_parameter_sets", get_parameter_sets)
     monkeypatch.setattr(
-        simulations.bsc, "add_parameter_set", lambda name, model=None: calls.append(("add", name))
+        simulations.bsc,
+        "add_parameter_set",
+        lambda name, model=None: calls.append(("add", name)),
     )
     monkeypatch.setattr(
         simulations.bsc,
@@ -140,43 +152,112 @@ def test_example_inputs_of_a_large_single_kind_model_shows_just_the_first_few():
     assert simulations.example_inputs(kinds) == ["S0", "S1", "S2"]
 
 
-# --- fold_options / nearest_fold ----------------------------------------------
-def test_fold_options_steps_one_two_five_through_the_default_range():
-    assert simulations.fold_options(*simulations.DEFAULT_FOLD_RANGE) == [
-        0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0
-    ]
+# --- slider settings & options ------------------------------------------------
+def test_default_slider_settings_span_a_hundredfold_either_way_on_a_log_scale():
+    assert simulations.default_slider_settings(90.0) == {
+        "min": 0.9,
+        "max": 9000.0,
+        "log": True,
+    }
 
 
-def test_fold_options_are_exact_round_numbers():
-    # Built from strings, so no 0.020000000000000004-style float noise.
-    assert 0.02 in simulations.fold_options(0.01, 1)
-    assert 0.0005 in simulations.fold_options(1e-4, 1e-3)
+def test_a_zero_default_starts_on_a_linear_zero_to_one_slider():
+    settings = simulations.default_slider_settings(0.0)
+    assert settings == {"min": 0.0, "max": 1.0, "log": False}
+    options = simulations.slider_options(settings, default=0.0)
+    assert options[0] == 0.0 and options[-1] == 1.0  # starts on 0, its default
 
 
-def test_fold_options_respect_a_narrowed_range():
-    assert simulations.fold_options(0.5, 20) == [0.5, 1.0, 2.0, 5.0, 10.0, 20.0]
+def test_default_slider_bounds_are_round_numbers_that_survive_display():
+    # Real defaults carry float noise; the bounds shouldn't (the settings boxes
+    # show 6 significant figures and hand that rounded value back).
+    settings = simulations.default_slider_settings(2.9999959316797846)
+    assert (settings["min"], settings["max"]) == (0.03, 300.0)
 
 
-def test_every_bound_option_is_on_the_scale():
-    bounds = simulations.FOLD_BOUND_OPTIONS
-    assert bounds[0] == 1e-4 and bounds[-1] == 1e4
-    assert set(simulations.fold_options(*simulations.DEFAULT_FOLD_RANGE)) <= set(bounds)
+def test_a_negative_default_starts_on_a_linear_scale():
+    settings = simulations.default_slider_settings(-2.0)
+    assert (settings["min"], settings["max"], settings["log"]) == (-200.0, -0.02, False)
 
 
-def test_nearest_fold_measures_distance_on_a_log_scale():
-    options = [0.1, 1.0, 10.0]
-    assert simulations.nearest_fold(options, 3.0) == 1.0  # 3 is nearer 1 than 10 in ratio terms
-    assert simulations.nearest_fold(options, 4.0) == 10.0
-    assert simulations.nearest_fold(options, 1.0) == 1.0
+def test_log_slider_has_evenly_spaced_stops_per_decade_and_includes_the_default():
+    default = 90.0000110591902  # real defaults carry float noise like this
+    options = simulations.slider_options(
+        simulations.default_slider_settings(default), default
+    )
+
+    assert options[0] == pytest.approx(0.9) and options[-1] == pytest.approx(9000.0)
+    assert default in options  # exactly, so the slider can start on it
+    # One constant ratio between stops (10^(1/20) ≈ 1.1220): evenly spaced in log.
+    # 4 decimals, because stops are rounded to 6 significant figures for display.
+    ratios = {
+        round(b / a, 4) for a, b in zip(options, options[1:]) if default not in (a, b)
+    }
+    assert ratios == {round(10 ** (1 / simulations.LOG_STOPS_PER_DECADE), 4)}
 
 
-# --- input_step ---------------------------------------------------------------
+def test_linear_slider_has_a_hundred_equal_intervals():
+    settings = {"min": 0.0, "max": 10.0, "log": False}
+    options = simulations.slider_options(settings, default=5.0)
+    assert len(options) == simulations.LINEAR_INTERVALS + 1
+    assert options[:3] == [0.0, 0.1, 0.2]  # clean, evenly spaced values
+
+
+def test_a_default_outside_the_range_is_not_added():
+    settings = {"min": 10.0, "max": 20.0, "log": False}
+    options = simulations.slider_options(settings, default=3.0)
+    assert 3.0 not in options and (options[0], options[-1]) == (10.0, 20.0)
+
+
+def test_an_extreme_log_range_is_capped_rather_than_crashing():
+    # high / low = 1e600 overflows to infinity; this once crashed the app.
+    options = simulations.slider_options(
+        {"min": 1e-300, "max": 1e300, "log": True}, 1.0
+    )
+    assert (
+        2 <= len(options) <= simulations.MAX_STOPS + 1
+    )  # +1: the default, added exactly
+
+
+_OK = {"min": 0.5, "max": 50.0, "log": True}
+
+
 @pytest.mark.parametrize(
-    "default, step",
-    [(100.0, 10.0), (1e-12, 1e-13), (-2.0, 0.2), (0.0, 0.1)],
+    "settings, message",
+    [
+        ({**_OK, "max": float("inf")}, "ordinary numbers"),
+        ({**_OK, "min": float("nan")}, "ordinary numbers"),
+        ({**_OK, "min": 50.0}, "Min must be below Max"),  # equal
+        ({**_OK, "min": 80.0}, "Min must be below Max"),  # above
+        (
+            {**_OK, "min": 1.0, "max": 1.000000000001},
+            "Min must be below Max",
+        ),  # can't tell apart
+    ],
 )
-def test_input_step_is_a_tenth_of_the_default_whatever_its_size(default, step):
-    assert simulations.input_step(default) == pytest.approx(step)
+def test_unusable_slider_settings_fall_back_to_the_default_range(settings, message):
+    checked, problem = simulations.check_slider_settings(settings, default=5.0)
+    assert message in problem
+    assert checked == simulations.default_slider_settings(5.0)
+
+
+@pytest.mark.parametrize("low", [0.0, -5.0])
+def test_a_log_scale_without_a_positive_min_switches_to_linear(low):
+    checked, problem = simulations.check_slider_settings(
+        {**_OK, "min": low}, default=5.0
+    )
+    assert checked["log"] is False and checked["min"] == low  # their range is kept
+    assert "needs Min above 0" in problem
+
+
+def test_sensible_slider_settings_pass_unchanged():
+    assert simulations.check_slider_settings(_OK, default=5.0) == (_OK, "")
+
+
+def test_nearest_option_uses_a_log_distance_on_log_sliders_only():
+    options = [1.0, 10.0, 100.0]
+    assert simulations.nearest_option(options, 4.0, log=True) == 10.0  # ×2.5 vs ×4
+    assert simulations.nearest_option(options, 4.0, log=False) == 1.0  # 3 vs 6 away
 
 
 # --- build_scan_dict_from_values ----------------------------------------------
@@ -246,8 +327,14 @@ def test_build_scan_dict_all_single_each_have_length_one():
 def test_build_scan_dict_grid_linear_and_log():
     table = _table(
         _row("B", lower=1, upper=4, type_=simulations.TYPE_GRID, n=4),
-        _row("C", lower=0.01, upper=100, type_=simulations.TYPE_GRID,
-             scale=simulations.SCALE_LOG, n=5),
+        _row(
+            "C",
+            lower=0.01,
+            upper=100,
+            type_=simulations.TYPE_GRID,
+            scale=simulations.SCALE_LOG,
+            n=5,
+        ),
     )
     scan, errors = simulations.build_scan_dict_from_table(table)
 
@@ -259,14 +346,18 @@ def test_build_scan_dict_grid_linear_and_log():
 def test_build_scan_dict_rejects_an_unknown_type():
     # The UI can only emit Single/Grid (fixed dropdown), but the adapter still
     # guards its `else` branch so a stray type surfaces as a friendly error.
-    scan, errors = simulations.build_scan_dict_from_table(_table(_row("A", type_="Bogus")))
+    scan, errors = simulations.build_scan_dict_from_table(
+        _table(_row("A", type_="Bogus"))
+    )
 
     assert "A" not in scan
     assert "Unknown type" in errors["A"]
 
 
 def test_build_scan_dict_single_without_a_value_errors():
-    scan, errors = simulations.build_scan_dict_from_table(_table(_row("A", value=np.nan)))
+    scan, errors = simulations.build_scan_dict_from_table(
+        _table(_row("A", value=np.nan))
+    )
 
     assert "A" not in scan
     assert "Value" in errors["A"]
@@ -275,7 +366,9 @@ def test_build_scan_dict_single_without_a_value_errors():
 def test_build_scan_dict_collects_errors_without_dropping_good_rows():
     table = _table(
         _row("good", value=1.0),
-        _row("bad", lower=10, upper=1, type_=simulations.TYPE_GRID, n=3),  # lower >= upper
+        _row(
+            "bad", lower=10, upper=1, type_=simulations.TYPE_GRID, n=3
+        ),  # lower >= upper
     )
     scan, errors = simulations.build_scan_dict_from_table(table)
 
@@ -287,8 +380,14 @@ def test_build_scan_dict_collects_errors_without_dropping_good_rows():
 def test_input_scales_from_table_maps_each_input_to_its_scale():
     table = _table(
         _row("A", value=1.0),  # Single ⇒ Linear (the default)
-        _row("B", lower=0.1, upper=10, type_=simulations.TYPE_GRID,
-             scale=simulations.SCALE_LOG, n=5),
+        _row(
+            "B",
+            lower=0.1,
+            upper=10,
+            type_=simulations.TYPE_GRID,
+            scale=simulations.SCALE_LOG,
+            n=5,
+        ),
     )
     assert simulations.input_scales_from_table(table) == {
         "A": simulations.SCALE_LINEAR,
@@ -322,8 +421,10 @@ def test_run_forwards_args_and_returns_wide_long_pair(monkeypatch, stub_model_st
         scan_dict, timepoints=None, format_output=None, model=None, **kwargs
     ):
         seen.update(
-            scan_dict=scan_dict, timepoints=timepoints,
-            format_output=format_output, model=model,
+            scan_dict=scan_dict,
+            timepoints=timepoints,
+            format_output=format_output,
+            model=model,
         )
         return [wide, long]  # the package returns [wide, long] for format_output="both"
 
@@ -340,18 +441,33 @@ def test_run_forwards_args_and_returns_wide_long_pair(monkeypatch, stub_model_st
 
 
 def test_run_restores_initial_state_after_running(monkeypatch, stub_model_state):
-    monkeypatch.setattr(simulations.qsb, "run_simulations", lambda *a, **k: ["wide", "long"])
+    monkeypatch.setattr(
+        simulations.qsb, "run_simulations", lambda *a, **k: ["wide", "long"]
+    )
     simulations.run("MODEL", {"X": [0.1, 1, 10]})
 
     # Every input's snapshot value is written back under its EXACT name — and only
     # inputs: the non-input assignment quantity is never touched.
     assert stub_model_state == [
-        ("params", {"name": "k", "exact": True, "initial_value": 2.0, "model": "MODEL"}),
-        ("species", {"name": "X", "exact": True, "initial_concentration": 3.0, "model": "MODEL"}),
+        (
+            "params",
+            {"name": "k", "exact": True, "initial_value": 2.0, "model": "MODEL"},
+        ),
+        (
+            "species",
+            {
+                "name": "X",
+                "exact": True,
+                "initial_concentration": 3.0,
+                "model": "MODEL",
+            },
+        ),
     ]
 
 
-def test_run_restores_initial_state_even_when_the_run_raises(monkeypatch, stub_model_state):
+def test_run_restores_initial_state_even_when_the_run_raises(
+    monkeypatch, stub_model_state
+):
     def boom(*a, **k):
         raise RuntimeError("simulation failed")
 
@@ -406,7 +522,9 @@ def test_real_model_reading_inputs_leaves_no_parameter_set_behind():
     simulations.get_inputs(model)
     simulations.get_input_kinds(model)
 
-    assert [p["name"] for p in simulations.bsc.get_parameter_sets(model=model)] == before
+    assert [
+        p["name"] for p in simulations.bsc.get_parameter_sets(model=model)
+    ] == before
 
 
 def test_real_model_kinds_label_parameters_and_species():
@@ -427,7 +545,9 @@ def test_run_leaves_every_multi_compartment_default_unchanged():
     timepoints = simulations.make_timepoints(0, 10, 5)
 
     simulations.run(model, {}, timepoints)  # a plain default run
-    simulations.run(model, {"Calcium{compartment[3]}": [5.0, 50.0]}, timepoints)  # a scan
+    simulations.run(
+        model, {"Calcium{compartment[3]}": [5.0, 50.0]}, timepoints
+    )  # a scan
 
     assert simulations.get_inputs(model) == pytest.approx(before)
 
@@ -444,4 +564,6 @@ def test_run_applies_a_changed_compartment_qualified_species():
     wide, _ = simulations.run(model, {**held, target: [50.0]}, timepoints)
 
     column = next(c for c in wide.columns if target in str(c))
-    assert wide[column].iloc[0] == pytest.approx(50.0)  # the run starts from the new value
+    assert wide[column].iloc[0] == pytest.approx(
+        50.0
+    )  # the run starts from the new value

@@ -131,47 +131,90 @@ def example_inputs(
     return chosen
 
 
-# --- Inputs: fold-change sliders ----------------------------------------------
-# A slider moves an input through multiples of its default rather than evenly
-# spaced values: inputs span orders of magnitude, and "2× more", "a tenth" is how
-# experimentalists think about a change anyway.
-DEFAULT_FOLD_RANGE = (0.01, 100.0)
+# --- Inputs: sliders ----------------------------------------------------------
+# Every chosen input gets a slider. Its settings are plain: a minimum, a maximum,
+# and log scale or not.
+LOG_STOPS_PER_DECADE = 20  # stops per factor of ten on a log slider
+LINEAR_INTERVALS = 100  # equal steps from min to max on a linear slider
+MAX_STOPS = 1000  # cap, so an extreme log range can't build a huge slider
 
 
-def fold_options(low: float, high: float) -> list[float]:
-    """Fold changes from ``low`` to ``high`` on a 1-2-5 scale (…, 0.5, 1, 2, 5, 10, …).
+def default_slider_settings(default: float) -> dict:
+    """Starting settings: 1/100 to 100× the default, on a log scale where possible.
 
-    1-2-5 steps are round numbers people read at a glance. Ends are included when
-    they fall on the scale.
+    Inputs span orders of magnitude, so a log scale is the sensible start. A log
+    scale needs positive values, so a negative default starts linear instead. A
+    default of 0 gives no hint of a sensible range, so it starts at a linear 0 – 1
+    for the user to widen in the settings.
+    Bounds are rounded to 6 significant figures — what the settings boxes display
+    and hand back — so the slider's stops don't shift once those boxes exist.
     """
-    options = []
-    for exponent in range(math.floor(math.log10(low)), math.ceil(math.log10(high)) + 1):
-        for mantissa in (1, 2, 5):
-            fold = float(f"{mantissa}e{exponent}")  # exact, unlike 2 * 10**-2
-            if low * (1 - 1e-9) <= fold <= high * (1 + 1e-9):
-                options.append(fold)
-    return options
+    if default == 0:
+        return {"min": 0.0, "max": 1.0, "log": False}
+    low, high = sorted(
+        float(f"{bound:.6g}") for bound in (default / 100, default * 100)
+    )
+    return {"min": low, "max": high, "log": low > 0}
 
 
-# Every range the ⋯ menu can set, from 1/10,000× to 10,000×.
-FOLD_BOUND_OPTIONS = fold_options(1e-4, 1e4)
+def slider_options(settings: dict, default: float) -> list[float]:
+    """The values a slider stops at, from ``settings`` — always including the default.
+
+    Log: ``LOG_STOPS_PER_DECADE`` evenly spaced stops per factor of ten. Linear:
+    ``LINEAR_INTERVALS`` equal steps from min to max. Stops are rounded to 6
+    significant figures so they display cleanly; the default is added exactly
+    (when it lies within range) so the slider can sit on it.
+    """
+    low, high = settings["min"], settings["max"]
+    if settings["log"]:
+        # log10(high) - log10(low), not log10(high / low): that ratio can overflow
+        # to infinity for an extreme range (1e-300 → 1e300) and crash.
+        decades = math.log10(high) - math.log10(low)
+        count = min(MAX_STOPS, max(2, round(LOG_STOPS_PER_DECADE * decades) + 1))
+        values = np.geomspace(low, high, count)
+    else:
+        values = np.linspace(low, high, LINEAR_INTERVALS + 1)
+    options = {float(f"{value:.6g}") for value in values}
+    if low <= default <= high:
+        options.add(default)
+    return sorted(options)
 
 
-def nearest_fold(options: list[float], fold: float) -> float:
-    """The option closest to ``fold`` — measured on a log scale, as suits multiples."""
-    return min(options, key=lambda option: abs(math.log10(option) - math.log10(fold)))
+def check_slider_settings(settings: dict, default: float) -> tuple[dict, str]:
+    """Make user-edited slider settings safe. Returns (settings to use, message).
+
+    Anything unusable falls back to something that works, with a plain message
+    saying what happened ("" when the settings are fine).
+    """
+    low, high = settings["min"], settings["max"]
+    fallback = default_slider_settings(default)
+    if not (math.isfinite(low) and math.isfinite(high)):
+        return (
+            fallback,
+            "Min and Max must be ordinary numbers — using the default range.",
+        )
+    # Also catches a range too narrow to show: the slider displays 6 significant
+    # figures, so bounds that look identical there would give one usable stop.
+    if not low < high or f"{low:.6g}" == f"{high:.6g}":
+        return fallback, "Min must be below Max — using the default range."
+    if settings["log"] and low <= 0:
+        return {
+            **settings,
+            "log": False,
+        }, "A log scale needs Min above 0 — using linear."
+    return settings, ""
+
+
+def nearest_option(options: list[float], value: float, log: bool) -> float:
+    """The option closest to ``value``, on a log scale for a log slider."""
+    if log and value > 0:
+        return min(
+            options, key=lambda option: abs(math.log10(option) - math.log10(value))
+        )
+    return min(options, key=lambda option: abs(option - value))
 
 
 # --- Inputs: time course (values → scan_dict) ---------------------------------
-def input_step(default: float) -> float:
-    """How far one click of an input box's +/− moves it: about 10% of its default.
-
-    Model inputs span many orders of magnitude — a rate constant of 1e-12 beside a
-    concentration of 100 — so a fixed step like Streamlit's 0.01 is useless for
-    most of them. An input whose default is 0 gets a step of 0.1.
-    """
-    return abs(default) * 0.1 if default else 0.1
-
 
 
 def build_scan_dict_from_values(
