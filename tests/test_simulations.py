@@ -20,7 +20,8 @@ def stub_model_state(monkeypatch, stub_parameter_sets):
     """Stub reading a model's inputs and record every restore write.
 
     Reading goes through ``stub_parameter_sets`` (parameter ``k`` = 2.0, species
-    ``X`` = 3.0, plus a non-input assignment quantity), so the hermetic ``run``
+    ``X`` = 3.0, reaction parameter ``(R1).k1`` = 4.0, plus a non-input assignment
+    quantity), so the hermetic ``run``
     tests work without a real COPASI model. Returns the list that restore writes
     are appended to.
     """
@@ -30,6 +31,11 @@ def stub_model_state(monkeypatch, stub_parameter_sets):
     )
     monkeypatch.setattr(
         simulations.bsc, "set_parameters", lambda **kw: restored.append(("params", kw))
+    )
+    monkeypatch.setattr(
+        simulations.bsc,
+        "set_reaction_parameters",
+        lambda **kw: restored.append(("reaction", kw)),
     )
     return restored
 
@@ -41,7 +47,10 @@ _FAKE_PARAMETER_SET = {
         "k_assigned": {"value": 9.0, "simulation_type": "assignment"},  # not an input
     },
     "Initial Species Values": {"X": {"concentration": 3.0}},
+    "Kinetic Parameters": {"R1": {"k1": {"value": 4.0}}},
 }
+# The inputs the package names for that set (it decides which inputs exist).
+_FAKE_PACKAGE_INPUTS = {"k": None, "X": None, "(R1).k1": None}
 
 
 @pytest.fixture
@@ -58,6 +67,9 @@ def stub_parameter_sets(monkeypatch):
 
     monkeypatch.setattr(simulations.bsc, "get_parameter_sets", get_parameter_sets)
     monkeypatch.setattr(
+        simulations.qsb, "get_model_inputs", lambda model=None: _FAKE_PACKAGE_INPUTS
+    )
+    monkeypatch.setattr(
         simulations.bsc,
         "add_parameter_set",
         lambda name, model=None: calls.append(("add", name)),
@@ -70,19 +82,21 @@ def stub_parameter_sets(monkeypatch):
     return calls
 
 
-def test_get_inputs_lists_fixed_parameters_then_species_at_their_defaults(
+def test_get_inputs_lists_the_packages_inputs_at_their_defaults(
     stub_parameter_sets,
 ):
     inputs = simulations.get_inputs("MODEL")
 
-    assert inputs == {"k": 2.0, "X": 3.0}  # the assignment quantity is not an input
-    assert list(inputs) == ["k", "X"]  # the package's order: parameters, then species
+    # Only what the package names (not the assignment quantity), in its order.
+    assert inputs == {"k": 2.0, "X": 3.0, "(R1).k1": 4.0}
+    assert list(inputs) == ["k", "X", "(R1).k1"]
 
 
 def test_get_input_kinds_labels_each_input(stub_parameter_sets):
     assert simulations.get_input_kinds("MODEL") == {
         "k": simulations.KIND_PARAMETER,
         "X": simulations.KIND_SPECIES,
+        "(R1).k1": simulations.KIND_REACTION,
     }
 
 
@@ -357,6 +371,8 @@ def test_run_restores_initial_state_after_running(monkeypatch, stub_model_state)
                 "model": "MODEL",
             },
         ),
+        # In a list, so basico matches the name exactly, not as a substring.
+        ("reaction", {"name": ["(R1).k1"], "value": 4.0, "model": "MODEL"}),
     ]
 
 
@@ -390,21 +406,23 @@ def test_run_restores_model_state_so_held_inputs_stay_at_default():
 
 
 # --- reading inputs from real models (no stubs) --------------------------------
-# brusselator: species only · turing_base: parameters + species · array_1d: the
-# same species in many compartments ("Calcium{compartment[0]}", …) — the case
+# brusselator: species + reaction parameters · turing_base: parameters + species
+# · YeastGlycolysis: reaction parameters with names inside others ("(GAPDH).Knad"
+# and "(GAPDH).Knadh") · array_1d: the same species in many compartments ("Calcium{compartment[0]}", …) — the case
 # where basico's plain get_species names are wrong and every default went NaN.
 def _example_model(stem: str):
     path = next(p for p in simulations.bsc.get_examples() if Path(p).stem == stem)
     return simulations.bsc.load_model(path)
 
 
-@pytest.mark.parametrize("stem", ["brusselator", "turing_base", "array_1d"])
+@pytest.mark.parametrize(
+    "stem", ["brusselator", "turing_base", "YeastGlycolysis", "array_1d"]
+)
 def test_real_model_inputs_match_the_package_and_all_have_defaults(stem):
     model = _example_model(stem)
     inputs = simulations.get_inputs(model)
 
-    # Our copy of the package's input logic must agree with it exactly — names
-    # AND order — so the app and the package always mean the same inputs.
+    # Every input the package names, in its order, each with a default found.
     assert list(inputs) == list(simulations.qsb.get_model_inputs(model=model))
     assert not any(np.isnan(value) for value in inputs.values())
     assert list(simulations.get_input_kinds(model)) == list(inputs)
@@ -427,6 +445,49 @@ def test_real_model_kinds_label_parameters_and_species():
 
     assert kinds["v1"] == simulations.KIND_PARAMETER
     assert kinds["S1"] == simulations.KIND_SPECIES
+
+
+def test_real_model_kinds_label_reaction_parameters():
+    kinds = simulations.get_input_kinds(_example_model("brusselator"))
+    assert kinds["(R1).k1"] == simulations.KIND_REACTION
+
+
+def test_run_leaves_every_reaction_parameter_default_unchanged():
+    # The restore guard for reaction parameters: a scan, then every default back.
+    model = _example_model("YeastGlycolysis")
+    before = simulations.get_inputs(model)
+    timepoints = simulations.make_timepoints(0, 1, 3)
+
+    simulations.run(model, {}, timepoints)  # a plain default run
+    simulations.run(model, {"(GAPDH).Knad": [0.05, 0.5]}, timepoints)  # a scan
+
+    assert simulations.get_inputs(model) == pytest.approx(before)
+
+
+def test_restoring_a_reaction_parameter_leaves_a_longer_named_one_alone():
+    # basico documents its name match as "or a substring", which would let Knad's
+    # restore overwrite Knadh. It matches exactly today; this pins that. Restoring
+    # one input on its own, so a full restore's order can't hide a regression.
+    model = _example_model("YeastGlycolysis")
+    knadh = simulations.get_inputs(model)["(GAPDH).Knadh"]
+
+    simulations._restore_inputs(
+        model, {"(GAPDH).Knad": (simulations.KIND_REACTION, 0.5)}
+    )
+
+    after = simulations.get_inputs(model)
+    assert after["(GAPDH).Knad"] == pytest.approx(0.5)
+    assert after["(GAPDH).Knadh"] == pytest.approx(knadh)  # untouched
+
+
+def test_run_applies_a_changed_reaction_parameter():
+    # Changing a rate constant must change the result, not be silently ignored.
+    model = _example_model("brusselator")
+    timepoints = simulations.make_timepoints(0, 10, 20)
+    default, _ = simulations.run(model, {}, timepoints)
+    faster, _ = simulations.run(model, {"(R1).k1": [10.0]}, timepoints)
+
+    assert not default["[X]"].equals(faster["[X]"])
 
 
 def test_run_leaves_every_multi_compartment_default_unchanged():

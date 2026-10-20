@@ -57,7 +57,7 @@ def get_inputs_cached(kind: str, ref: str) -> dict:
 
 @st.cache_data(show_spinner=False)
 def get_input_kinds_cached(kind: str, ref: str) -> dict:
-    """Each input's kind (``"parameter"`` / ``"species"``), per model.
+    """Each input's kind (parameter, species or reaction parameter), per model.
 
     Same cache pattern as ``get_inputs_cached``. Labels the chip inputs and picks
     the newcomer example (a few of each kind).
@@ -139,24 +139,16 @@ def use_custom_model_dialog():
         st.rerun()
 
 
-# --- Tab building blocks ------------------------------------------------------
-# Every tab's code runs on every rerun — hidden tabs included — so anything drawn
-# in more than one tab needs a key unique to that tab, or Streamlit raises a
-# duplicate-ID error. Each helper takes the tab's short name and prefixes its keys
-# with it ("time_course::end", "vary_multiple::end", …). The *code* is shared;
-# each tab's *values* are its own.
+# --- Building blocks ----------------------------------------------------------
 
 
-def render_time_window(tab: str):
+def render_time_window():
     """Start / end / number-of-points controls. Returns (start, end, n, error).
 
     Start/end bound the window we *record*, not what COPASI integrates — it
     always runs from 0, so a later start keeps the model's history (and its
     events) intact and simply focuses every recorded point on the stretch you
     care about. See simulations.make_timepoints.
-
-    Shared by the tabs that record a time course today. Scan tabs are expected to
-    get their own controls (e.g. "measure at time t") rather than options here.
     """
     st.markdown("**Time window**")
     col_start, col_end, col_points = st.columns(3)
@@ -165,7 +157,7 @@ def render_time_window(tab: str):
         min_value=0.0,
         value=0.0,
         step=100.0,
-        key=f"{tab}::start",
+        key="start",
         help=(
             "When to start recording. The model always runs from 0, so raising "
             "this skips nothing — it just puts your points where the action is."
@@ -176,7 +168,7 @@ def render_time_window(tab: str):
         min_value=0.0,
         value=1000.0,
         step=100.0,
-        key=f"{tab}::end",
+        key="end",
         help="When to stop, in the model's own time units.",
     )
     n_points = col_points.number_input(
@@ -184,7 +176,7 @@ def render_time_window(tab: str):
         min_value=2,
         value=300,
         step=50,
-        key=f"{tab}::n_points",
+        key="n_points",
         help="How many timepoints to record across the window.",
     )
 
@@ -194,7 +186,7 @@ def render_time_window(tab: str):
     return start, end, n_points, error
 
 
-def render_events_panel(tab: str, source: dict, end_time: float):
+def render_events_panel(source: dict, end_time: float):
     """The model's events (read-only), beside the time window they inform.
 
     Its whole job is to inform the time-window choice: many models only *do*
@@ -219,19 +211,19 @@ def render_events_panel(tab: str, source: dict, end_time: float):
     if status:
         st.caption(status)
 
-    with st.expander("Events in this model", expanded=False, key=f"{tab}::events"):
+    with st.expander("Events in this model", expanded=False, key="events"):
         st.dataframe(
             events.events_table(model_events),
             hide_index=True,
             width="stretch",
-            key=f"{tab}::events_table",
+            key="events_table",
         )
         timeline = events.segments(model_events)
         if timeline:
             st.plotly_chart(
                 events.timeline_figure(timeline, end=end_time, unit=time_unit),
                 width="stretch",
-                key=f"{tab}::events_timeline",
+                key="events_timeline",
             )
         else:
             st.caption(
@@ -249,7 +241,7 @@ def _toggle_output(hidden_key: str, output: str):
         hidden.add(output)
 
 
-def render_legend(tab: str, hidden_key: str, outputs: list[str]):
+def render_legend(hidden_key: str, outputs: list[str]):
     """The app's own legend: one button per output, in its line's colour.
 
     Clicking an entry hides or shows that output. This replaces Plotly's legend,
@@ -270,11 +262,11 @@ def render_legend(tab: str, hidden_key: str, outputs: list[str]):
     css = []
     with st.container(horizontal=True, gap="small"):
         for i, output in enumerate(outputs):
-            box_key = f"{tab}-legend-{i}"
+            box_key = f"legend-{i}"
             with st.container(key=box_key, width="content"):
                 st.button(
                     output,
-                    key=f"{tab}::legend::{i}",
+                    key=f"legend::{i}",
                     on_click=_toggle_output,
                     args=(hidden_key, output),
                 )
@@ -286,15 +278,13 @@ def render_legend(tab: str, hidden_key: str, outputs: list[str]):
     st.html(f"<style>{' '.join(css)}</style>")
 
 
-def render_results(tab: str, source: dict):
-    """This tab's latest results, from the run request the tab stored.
+def render_results(source: dict):
+    """The latest results, from the run request stored under ``last_run``.
 
-    Each tab keeps its own request under ``last_run::<tab>``, so running a scan
-    in one tab never shows up in another. Only a result for the currently
-    selected model is shown — switching models leaves the old request behind,
-    but it isn't this model's.
+    Only a result for the currently selected model is shown — switching models
+    leaves the old request behind, but it isn't this model's.
     """
-    last_run = st.session_state.get(f"last_run::{tab}")
+    last_run = st.session_state.get("last_run")
     if not last_run or (last_run["kind"], last_run["ref"]) != (
         source["kind"],
         source["ref"],
@@ -318,10 +308,10 @@ def render_results(tab: str, source: dict):
             "This model couldn't complete the simulation for those settings. "
             "Try different inputs, or another model."
         )
-        with st.expander("What went wrong?", key=f"{tab}::run_error"):
+        with st.expander("What went wrong?", key="run_error"):
             st.write(str(exc))
-        # `return`, not st.stop(): st.stop() halts the WHOLE script, which would
-        # blank every tab drawn after this one. return only ends this tab's panel.
+        # `return`, not st.stop(): st.stop() halts the WHOLE script, so anything
+        # drawn after the results would vanish. return only ends this panel.
         return
 
     # The plot follows what was run (see plotting.mode): nothing scanned -> one
@@ -334,10 +324,10 @@ def render_results(tab: str, source: dict):
             # Only the label changes: "area" stacks its series, so say so.
             format_func=lambda kind: "stacked area" if kind == "area" else kind,
             horizontal=True,
-            key=f"{tab}::plot_type",
+            key="plot_type",
         )
         outputs = long[plotting.COL_OUTPUT_TYPE].unique().tolist()
-        hidden_key = f"{tab}::hidden::{last_run['kind']}::{last_run['ref']}"
+        hidden_key = f"hidden::{last_run['kind']}::{last_run['ref']}"
         hidden = st.session_state.setdefault(hidden_key, set())
         shown = [output for output in outputs if output not in hidden]
         if plotting.mode(scan_dict) == plotting.MODE_KINETICS:
@@ -349,17 +339,17 @@ def render_results(tab: str, source: dict):
             )
         # Our legend (under the plot) replaces Plotly's.
         fig.update_layout(showlegend=False)
-        st.plotly_chart(fig, width="stretch", key=f"{tab}::plot")
-        render_legend(tab, hidden_key, outputs)
+        st.plotly_chart(fig, width="stretch", key="plot")
+        render_legend(hidden_key, outputs)
     except Exception as exc:  # broad on purpose: keep the data, explain the plot
         st.warning(
             "Couldn't draw a plot for this result — here's the raw data instead."
         )
-        with st.expander("What went wrong?", key=f"{tab}::plot_error"):
+        with st.expander("What went wrong?", key="plot_error"):
             st.write(str(exc))
 
-    with st.expander("Raw results table", key=f"{tab}::raw"):
-        st.dataframe(wide, width="stretch", key=f"{tab}::raw_results")
+    with st.expander("Raw results table", key="raw"):
+        st.dataframe(wide, width="stretch", key="raw_results")
 
 
 def _add_input(chosen_key: str, picker_key: str):
@@ -471,9 +461,15 @@ def render_input_row(
 
         # Seeded through session state, not value=, so _switch_to_log can change
         # Min: Streamlit warns if a widget gets both a value= and a state value.
-        base = simulations.default_slider_settings(default)
-        for field in ("min", "max", "log"):
-            st.session_state.setdefault(keys[field], base[field])
+        # Written back on *every* run, not just the first: only a value set from
+        # the script is sent to the browser, so otherwise a later run sends just
+        # the widget's built-in default (0) and the panel showed Min = Max = 0.
+        seeds = simulations.default_slider_settings(default) | {
+            "scan": False,
+            "n": simulations.DEFAULT_SCAN_VALUES,
+        }
+        for field, seed in seeds.items():
+            st.session_state[keys[field]] = st.session_state.get(keys[field], seed)
         # Keyed so the open panel stays with *this* input when the rows reorder
         # (a scanned input jumps to the top). Unkeyed, Streamlit tells elements
         # apart by position, so the panel stayed open on whichever row moved in.
@@ -507,7 +503,6 @@ def render_input_row(
                     "Number of values",
                     min_value=2,
                     max_value=simulations.MAX_SCAN_VALUES,
-                    value=simulations.DEFAULT_SCAN_VALUES,
                     step=1,
                     key=keys["n"],
                 )
@@ -547,7 +542,7 @@ INPUTS_COLUMN_CSS = """
 """
 
 
-def render_time_course_mode(tab: str, source: dict):
+def render_time_course(source: dict):
     """Time course: change a few inputs, and everything else runs at its default.
 
     An "Add an input…" picker adds inputs as compact rows (``render_input_row``),
@@ -561,7 +556,7 @@ def render_time_course_mode(tab: str, source: dict):
     """
     defaults = get_inputs_cached(source["kind"], source["ref"])
     kinds = get_input_kinds_cached(source["kind"], source["ref"])
-    model_key = f"{tab}::{source['kind']}::{source['ref']}"
+    model_key = f"{source['kind']}::{source['ref']}"
     chosen_key = f"{model_key}::chosen"
     picker_key = f"{model_key}::picker"
     st.session_state.setdefault(chosen_key, simulations.example_inputs(kinds))
@@ -575,8 +570,8 @@ def render_time_course_mode(tab: str, source: dict):
     st.html(f"<style>{INPUTS_COLUMN_CSS}</style>")
 
     with col_outputs:
-        start, end, n_points, time_error = render_time_window(tab)
-        render_events_panel(tab, source, end)
+        start, end, n_points, time_error = render_time_window()
+        render_events_panel(source, end)
 
     with col_inputs, st.container(key="time-course-inputs"):
         st.selectbox(
@@ -589,7 +584,7 @@ def render_time_course_mode(tab: str, source: dict):
                 + (
                     "initial concentration"
                     if kinds[name] == simulations.KIND_SPECIES
-                    else "parameter"
+                    else kinds[name]  # "parameter" or "reaction parameter"
                 )
             ),
             label_visibility="collapsed",
@@ -622,7 +617,7 @@ def render_time_course_mode(tab: str, source: dict):
         scan_dict = simulations.build_scan_dict_from_values(defaults, chosen_values)
 
         if not time_error:
-            st.session_state[f"last_run::{tab}"] = {
+            st.session_state["last_run"] = {
                 "kind": source["kind"],
                 "ref": source["ref"],
                 "scan_dict": scan_dict,
@@ -630,7 +625,7 @@ def render_time_course_mode(tab: str, source: dict):
             }
 
     with col_outputs:
-        render_results(tab, source)
+        render_results(source)
 
 
 # --- Page ---------------------------------------------------------------------
@@ -643,7 +638,7 @@ options = list(registry)
 
 # The sidebar is for choosing *what* to simulate — a familiar, always-visible
 # home that leaves the content area for inputs and results (snapshots will join
-# it later). Everything about *how* to run lives in the tabs.
+# it later). Everything about *how* to run lives in the main area.
 with st.sidebar:
     st.header("Setup")
 
@@ -693,6 +688,6 @@ if choice == models.DEFAULT_MODEL:
 st.caption(model_line)
 
 # --- Time course --------------------------------------------------------------
-# One view, no tabs: a visitor meets one clear experience. Scanning one input
+# One view: a visitor meets one clear experience. Scanning one input
 # is a setting on that input's row (⚙), not a separate mode.
-render_time_course_mode("time_course", source)
+render_time_course(source)

@@ -35,7 +35,7 @@ def _result_tables(at):
 
 def _picker(at):
     """The "Add an input" picker. Found by label: at.selectbox[0] is the sidebar's
-    Model picker, now that Time course isn't inside a tab of its own."""
+    Model picker."""
     return next(s for s in at.selectbox if s.label == "Add an input")
 
 
@@ -67,8 +67,8 @@ def _species(name):
     return f"{name} (initial concentration)"
 
 
-def _slider(tab, label):
-    return next(s for s in tab.select_slider if s.label == label)
+def _slider(at, label):
+    return next(s for s in at.select_slider if s.label == label)
 
 
 def _keyed(elements, suffix):
@@ -89,10 +89,20 @@ def test_time_course_offers_an_input_picker_and_sliders_instead_of_the_table():
     assert _picker(at).value is None
     # brusselator has 6 inputs, all species: more than 5, so the newcomer example
     # is the first 3 of that kind — each a slider sitting on its default value.
-    request = at.session_state["last_run::time_course"]["scan_dict"]
+    request = at.session_state["last_run"]["scan_dict"]
     for name in ("X", "Y", "A"):
         assert _slider(at, _species(name)).value == request[name][0]
     assert "Run simulation" not in [b.label for b in at.button]  # it auto-runs
+
+
+def test_reaction_parameters_are_offered_and_shown_in_the_example():
+    # brusselator has species and reaction parameters (rate constants such as
+    # "(R1).k1"), so the newcomer example shows a few of each.
+    at = _brusselator()
+    request = at.session_state["last_run"]["scan_dict"]
+    for name in ("(R1).k1", "(R2).k1", "(R3).k1"):
+        assert _slider(at, name).value == request[name][0]
+    assert "(R4).k1 · reaction parameter" in _picker(at).options
 
 
 def test_time_window_sits_with_the_plot_and_inputs_in_the_narrow_column():
@@ -108,7 +118,7 @@ def test_time_window_sits_with_the_plot_and_inputs_in_the_narrow_column():
 def test_time_course_reruns_when_a_slider_moves_and_holds_the_rest_at_default():
     at = _brusselator()
     _number_input(at, "Number of points").set_value(20).run()
-    before = at.session_state["last_run::time_course"]["scan_dict"]
+    before = at.session_state["last_run"]["scan_dict"]
 
     # Move X to the stop nearest twice its default.
     x_default = before["X"][0]
@@ -119,25 +129,27 @@ def test_time_course_reruns_when_a_slider_moves_and_holds_the_rest_at_default():
     _slider(at, _species("X")).set_value(target).run()  # this alone re-runs
 
     assert not at.exception
-    after = at.session_state["last_run::time_course"]["scan_dict"]
+    after = at.session_state["last_run"]["scan_dict"]
     assert after["X"] == [target]
     assert after["Y"] == before["Y"]  # a slider left alone
     assert len(after["B"]) == 1  # not chosen: still one run, held at default
     assert len(at.get("plotly_chart")) == 1
 
 
-def _plot_spec(tab) -> dict:
-    """The tab's results plot, as Plotly's JSON spec."""
-    return json.loads(tab.get("plotly_chart")[-1].proto.spec)
+def _plot_spec(at) -> dict:
+    """The results plot, as Plotly's JSON spec."""
+    return json.loads(at.get("plotly_chart")[-1].proto.spec)
 
 
-def _plotted_species(tab) -> list[str]:
-    return [trace["name"] for trace in _plot_spec(tab)["data"]]
+def _plotted_species(at) -> list[str]:
+    return [trace["name"] for trace in _plot_spec(at)["data"]]
 
 
-def _legend(tab, output):
+def _legend(at, output):
     """The app's own legend entry for ``output``."""
-    return next(b for b in tab.button if b.label == output and "::legend::" in b.key)
+    return next(
+        b for b in at.button if b.label == output and b.key.startswith("legend::")
+    )
 
 
 def test_hidden_outputs_stay_hidden_when_a_slider_moves():
@@ -149,7 +161,7 @@ def test_hidden_outputs_stay_hidden_when_a_slider_moves():
     _legend(at, "[Y]").click().run()  # hide Y
     assert "[Y]" not in _plotted_species(at)
 
-    x_default = at.session_state["last_run::time_course"]["scan_dict"]["X"][0]
+    x_default = at.session_state["last_run"]["scan_dict"]["X"][0]
     stops = simulations.slider_options(
         simulations.default_slider_settings(x_default), x_default
     )
@@ -192,7 +204,7 @@ def test_time_course_slider_settings_change_its_range_and_scale():
 
     _slider(at, _species("X")).set_value(4.0).run()  # and it still works
     assert not at.exception
-    assert at.session_state["last_run::time_course"]["scan_dict"]["X"] == [4.0]
+    assert at.session_state["last_run"]["scan_dict"]["X"] == [4.0]
 
 
 def test_time_course_slider_settings_that_make_no_sense_fall_back_safely():
@@ -230,6 +242,19 @@ def test_switching_a_zero_min_slider_to_log_moves_min_up_instead_of_refusing():
     ligand = _slider(at, _species("L"))
     assert (ligand.options[0], ligand.options[-1]) == ("1e-06", "1")  # now log
     assert not any("log scale needs" in c.value.lower() for c in at.caption)
+
+
+def test_the_settings_panel_sends_its_real_min_and_max_to_the_browser_every_run():
+    # Regression: after the first run the browser was sent only each box's
+    # built-in default, so a freshly drawn ⚙ panel showed Min = Max = 0 while the
+    # slider kept its real range. `proto` is the message the browser receives.
+    at = AppTest.from_file(APP_SCRIPT).run()
+    at.run()  # a second run, as after any interaction
+
+    for field in ("::min::MAPKKK", "::max::MAPKKK"):
+        box = _keyed(at.number_input, field)
+        assert box.proto.set_value
+        assert box.proto.value == at.session_state[box.key] != 0
 
 
 def test_app_describes_a_chosen_model_without_the_default_model_pointer():
@@ -427,7 +452,7 @@ def test_scanning_an_input_runs_its_values_and_shows_a_panel_for_each():
     _keyed(at.toggle, "::scan::A").set_value(True).run()
     assert not at.exception
 
-    request = at.session_state["last_run::time_course"]["scan_dict"]
+    request = at.session_state["last_run"]["scan_dict"]
     assert len(request["A"]) == simulations.DEFAULT_SCAN_VALUES  # 9 values
     assert len(request["X"]) == 1  # the other inputs stay single values
     assert _panel_count(at) == simulations.DEFAULT_SCAN_VALUES
@@ -455,7 +480,7 @@ def test_the_number_of_scan_values_can_change_up_to_the_cap():
     assert n_box.max == simulations.MAX_SCAN_VALUES
     n_box.set_value(4).run()
     assert not at.exception
-    assert len(at.session_state["last_run::time_course"]["scan_dict"]["A"]) == 4
+    assert len(at.session_state["last_run"]["scan_dict"]["A"]) == 4
     assert _panel_count(at) == 4
 
 
@@ -466,6 +491,6 @@ def test_turning_a_scan_off_brings_back_its_slider_and_a_single_run():
     assert not at.exception
 
     assert _slider(at, _species("A"))
-    assert len(at.session_state["last_run::time_course"]["scan_dict"]["A"]) == 1
+    assert len(at.session_state["last_run"]["scan_dict"]["A"]) == 1
     assert _panel_count(at) == 0  # one plain plot again
     assert not any(t.disabled for t in _scan_toggles(at))

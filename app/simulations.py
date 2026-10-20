@@ -26,16 +26,17 @@ import quicksimsbio as qsb
 # --- Inputs: what a model exposes ---------------------------------------------
 KIND_PARAMETER = "parameter"
 KIND_SPECIES = "species"
+KIND_REACTION = "reaction parameter"  # e.g. a rate constant, "(R1).k1"
 
 
 def _input_parameter_set(model) -> dict:
     """Snapshot a model's inputs through a temporary COPASI parameter set.
 
-    This is how ``qsb.get_model_inputs`` finds a model's inputs, and we mirror it
-    on purpose: a parameter set records every input under the same unique name the
-    package uses — including compartment-qualified species such as
-    ``Calcium{compartment[0]}``, which basico's plainer ``get_species`` reduces to
-    just ``Calcium`` — together with its kind and initial value.
+    This is also how ``qsb.get_model_inputs`` finds a model's inputs: a parameter
+    set records every input under the same unique name the package uses —
+    including compartment-qualified species such as ``Calcium{compartment[0]}``,
+    which basico's plainer ``get_species`` reduces to just ``Calcium``, and
+    reaction parameters as ``(reaction).parameter`` — with its initial value.
 
     The temporary set is removed in ``finally``: the loaded model is cached and
     shared across sessions, so it must be left exactly as we found it.
@@ -54,19 +55,22 @@ def _input_parameter_set(model) -> dict:
 def _read_inputs(model) -> dict[str, tuple[str, float]]:
     """``{name: (kind, default)}`` for every model input, in the package's order.
 
-    Same selection as ``qsb.get_model_inputs``: fixed global quantities first (an
-    assignment or ODE quantity depends on others, so it can't be set), then every
-    species at its initial concentration.
+    The package decides *which* inputs exist (``qsb.get_model_inputs``): fixed
+    global quantities, then species, then reaction parameters that aren't mapped
+    to a global quantity. The UI only looks up each one's kind and default value
+    in a parameter set, which holds all three under the package's names. So when
+    the package's rules change, the app follows without a copy to keep in step.
     """
     param_set = _input_parameter_set(model)
-    inputs = {
-        str(name): (KIND_PARAMETER, float(info["value"]))
-        for name, info in param_set["Initial Global Quantities"].items()
-        if info["simulation_type"] == "fixed"
-    }
+    known: dict[str, tuple[str, float]] = {}
+    for name, info in param_set["Initial Global Quantities"].items():
+        known[str(name)] = (KIND_PARAMETER, float(info["value"]))
     for name, info in param_set["Initial Species Values"].items():
-        inputs[str(name)] = (KIND_SPECIES, float(info["concentration"]))
-    return inputs
+        known[str(name)] = (KIND_SPECIES, float(info["concentration"]))
+    for reaction, parameters in param_set.get("Kinetic Parameters", {}).items():
+        for name, info in parameters.items():
+            known[f"({reaction}).{name}"] = (KIND_REACTION, float(info["value"]))
+    return {str(name): known[str(name)] for name in qsb.get_model_inputs(model=model)}
 
 
 def get_inputs(model) -> dict[str, float]:
@@ -80,10 +84,11 @@ def get_inputs(model) -> dict[str, float]:
 
 
 def get_input_kinds(model) -> dict[str, str]:
-    """Return each model input mapped to its kind: ``"parameter"`` or ``"species"``.
+    """Return each model input mapped to its kind (``KIND_PARAMETER``,
+    ``KIND_SPECIES`` or ``KIND_REACTION``).
 
-    The package computes this split internally but returns only the names; the UI
-    needs it to label inputs and to pick a newcomer's example of each kind.
+    The package returns only the names; the UI needs the kind to label inputs and
+    to pick a newcomer's example of each kind.
     """
     return {name: kind for name, (kind, _default) in _read_inputs(model).items()}
 
@@ -95,7 +100,7 @@ def example_inputs(
 
     A small model (at most ``show_all_up_to`` inputs) shows every input. A larger
     one shows the first ``per_kind`` of each kind, so the example teaches that
-    both parameters and species can be changed.
+    every kind of input (parameters, species, reaction parameters) can be changed.
     """
     if len(kinds) <= show_all_up_to:
         return list(kinds)
@@ -273,12 +278,21 @@ def _restore_inputs(model, snapshot: dict[str, tuple[str, float]]) -> None:
     (``exact=True``), so ``Calcium{compartment[3]}`` gets its own value back.
     Keying by basico's plain names instead collapsed every ``Calcium`` into one
     value and wrote it to all of them — erasing ``array_1d``'s calcium pulse.
+
+    Reaction parameters have no ``exact=``, and basico's docstring says ``name``
+    may be "a substring of the name" — which would let ``(GAPDH).Knad`` also
+    overwrite ``(GAPDH).Knadh`` (a real pair, in YeastGlycolysis). In practice a
+    plain string matches exactly (it passes basico's substring check *and* its
+    list-membership check, since a string is iterable too), but we pass the name
+    inside a list: the branch that is exact by design, not by accident.
     """
     for name, (kind, value) in snapshot.items():
         if kind == KIND_SPECIES:
             bsc.set_species(
                 name=name, exact=True, initial_concentration=value, model=model
             )
+        elif kind == KIND_REACTION:
+            bsc.set_reaction_parameters(name=[name], value=value, model=model)
         else:
             bsc.set_parameters(name=name, exact=True, initial_value=value, model=model)
 
@@ -309,8 +323,8 @@ def run(model, scan_dict: dict, timepoints: list[float] | None = None):
     value instead of its true default. We snapshot every input's initial value
     (by its exact name — see ``_restore_inputs``) and restore it in a ``finally``,
     so every run leaves the model exactly as it found it, keeping held-at-default
-    results history-independent. Only inputs are snapshotted, because inputs are
-    all ``run_simulations`` can set.
+    results history-independent. Only inputs are snapshotted (reaction parameters
+    included), because inputs are all ``run_simulations`` can set.
     """
     snapshot = _read_inputs(model)
     try:
