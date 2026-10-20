@@ -323,6 +323,29 @@ def missed_events(events: list[Event], end: float) -> list[Event]:
     return [e for e in events if e.time is not None and e.time > end]
 
 
+def missed_status(events: list[Event], end: float, unit: str) -> str:
+    """A neutral one-line note when the run stops before some events fire.
+
+    e.g. ``'Runs to 1,000 s · 2 of 3 events happen later'``. Empty when nothing
+    is missed. A count, not names, and deliberately not a warning: stopping early
+    is often intended (equilibration only, before the drug), and the timeline's
+    hollow markers already show *which* events are missed.
+
+    Only time-based events can be missed knowingly (see ``missed_events``), so
+    they're what's counted. If the model also has state-based events, the line
+    says "timed events" so the count matches what it describes.
+    """
+    missed = missed_events(events, end)
+    if not missed:
+        return ""
+    timed = [e for e in events if e.time is not None]
+    noun = "timed event" if len(timed) < len(events) else "event"
+    noun += "" if len(timed) == 1 else "s"
+    verb = "happens" if len(missed) == 1 else "happen"
+    runs_to = _with_unit(format_time(end), unit)
+    return f"Runs to {runs_to} · {len(missed)} of {len(timed)} {noun} {verb} later"
+
+
 def format_time(value: float) -> str:
     """Format a time for display: ``999990.0`` -> ``'999,990'``.
 

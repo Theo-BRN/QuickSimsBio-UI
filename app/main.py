@@ -213,14 +213,11 @@ def render_events_panel(tab: str, source: dict, end_time: float):
 
     # The sharp edge this feature exists to catch: a run that stops before its
     # events ever fire (e.g. CTCA's events at ~1e6 vs the default end of 1000).
-    # Directly under End time, where you'd act on it.
-    missed = events.missed_events(model_events, end_time)
-    if missed:
-        plural = len(missed) > 1
-        names = ", ".join(event.name for event in missed)
-        st.warning(
-            f"Your run will not include the event{'s' if plural else ''} {names}."
-        )
+    # Directly under End time, where you'd act on it. A plain caption, not a
+    # warning: stopping early is often deliberate (see events.missed_status).
+    status = events.missed_status(model_events, end_time, time_unit)
+    if status:
+        st.caption(status)
 
     with st.expander("Events in this model", expanded=False, key=f"{tab}::events"):
         st.dataframe(

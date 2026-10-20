@@ -275,6 +275,36 @@ def test_missed_events_ignores_state_based_events():
     assert events.missed_events([_event("threshold", time=None)], 10.0) == []
 
 
+# --- missed_status ------------------------------------------------------------
+def test_missed_status_counts_the_events_a_run_stops_before():
+    evts = [_event("start", 10.0), _event("set", 999_990.0), _event("ligand", 1e6)]
+    assert (
+        events.missed_status(evts, 1000.0, "s")
+        == "Runs to 1,000 s · 2 of 3 events happen later"
+    )
+
+
+def test_missed_status_agrees_in_number_for_a_single_event():
+    assert (
+        events.missed_status([_event("dose", 1e6)], 1000.0, "s")
+        == "Runs to 1,000 s · 1 of 1 event happens later"
+    )
+
+
+def test_missed_status_is_empty_once_the_run_reaches_every_event():
+    assert events.missed_status([_event("dose", 500.0)], 1000.0, "s") == ""
+
+
+def test_missed_status_counts_only_timed_events_and_says_so():
+    # A state-based event can't be "missed" knowingly, so it's left out of the
+    # count, and the wording makes clear what's being counted.
+    evts = [_event("dose", 1e6), _event("threshold", time=None)]
+    assert (
+        events.missed_status(evts, 1000.0, "")
+        == "Runs to 1,000 · 1 of 1 timed event happens later"
+    )
+
+
 # --- events_table -------------------------------------------------------------
 def test_events_table_lists_times_and_effects_in_plain_words():
     evts = [

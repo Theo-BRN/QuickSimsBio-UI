@@ -350,7 +350,12 @@ def _late_event():
     )
 
 
-def test_app_warns_when_the_run_window_misses_a_models_events():
+def _events_status(at) -> list[str]:
+    """Captions carrying the missed-events status line ('Runs to … later')."""
+    return [c.value for c in at.caption if c.value.startswith("Runs to")]
+
+
+def test_app_notes_when_the_run_window_misses_a_models_events():
     st.cache_data.clear()
     at = AppTest.from_file(APP_SCRIPT)
     at.session_state["selected_model"] = "brusselator"
@@ -360,20 +365,22 @@ def test_app_warns_when_the_run_window_misses_a_models_events():
         at.run()
 
     assert not at.exception
-    assert any("add drug" in w.value for w in at.warning)
+    assert len(_events_status(at)) == 1
+    assert "1 of 1 event happens later" in _events_status(at)[0]
+    assert list(at.warning) == []  # a neutral note now, not a yellow warning
 
 
-def test_app_clears_the_miss_warning_once_the_window_reaches_the_event():
+def test_app_clears_the_miss_note_once_the_window_reaches_the_event():
     st.cache_data.clear()
     at = AppTest.from_file(APP_SCRIPT)
     at.session_state["selected_model"] = "brusselator"
 
     with mock.patch("events.read_events", return_value=[_late_event()]):
         at.run()
-        _number_input(at, "End time").set_value(2_000_000.0).run()  # Time course's
+        _number_input(at, "End time").set_value(2_000_000.0).run()
 
     assert not at.exception
-    assert not any("add drug" in w.value for w in at.warning)
+    assert _events_status(at) == []
 
 
 def test_app_shows_no_events_section_for_a_model_without_events():
@@ -385,5 +392,5 @@ def test_app_shows_no_events_section_for_a_model_without_events():
         at.run()
 
     assert not at.exception
-    assert not any("End time" in w.value for w in at.warning)
+    assert _events_status(at) == []
     assert not any(e.label == "Events in this model" for e in at.expander)
