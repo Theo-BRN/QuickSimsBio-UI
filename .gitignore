@@ -6,7 +6,6 @@ __pycache__/
 
 # Poetry / Environments
 .venv/
-poetry.lock
 
 # Streamlit
 .streamlit/

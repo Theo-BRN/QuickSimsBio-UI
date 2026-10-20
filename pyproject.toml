@@ -10,7 +10,7 @@ dependencies = [
     "streamlit (>=1.58.0,<2.0.0)",
     "copasi-basico (>=0.86,<0.87)",
     "plotly (>=6.8.0,<7.0.0)",
-    "quicksimsbio @ file:///Users/theowork/Library/CloudStorage/OneDrive-SharedLibraries-UniversityofCambridge/User_PHARM_Cell_Signalling_Lab%20-%20Computational%20Coding%20Channel/Theo/Projects/QuickSimsBio"
+    "quicksimsbio @ git+https://github.com/Theo-BRN/QuickSimsBio.git@main",
 ]
 
 
@@ -18,8 +18,9 @@ dependencies = [
 requires = ["poetry-core>=2.0.0,<3.0.0"]
 build-backend = "poetry.core.masonry.api"
 
-[tool.poetry.dependencies]
-quicksimsbio = {develop = true}
+[tool.poetry]
+# An app, not a library: Poetry manages its dependencies but doesn't install it
+package-mode = false
 
 [tool.pytest.ini_options]
 # tests need app added here to allow imports
