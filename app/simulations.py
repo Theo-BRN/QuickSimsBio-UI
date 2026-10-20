@@ -10,11 +10,10 @@ keeping it Streamlit-free means every function here is unit-testable without a
 running app (the tests monkeypatch ``qsb`` the same way ``test_models`` patches
 ``basico``).
 
-The UI builds inputs as an editable **table** (one row per model input). This
-module owns the two pure translations around it: ``default_input_table`` (model
-defaults → starting table) and ``build_scan_dict_from_table`` (edited table →
-``scan_dict``). Keeping them here, free of Streamlit, is what makes the core
-logic testable.
+The UI gives each chosen input a slider (or, for the one input being scanned, a
+set of evenly spaced values). This module owns the pure maths behind those
+controls — slider stops, safe settings, scan values — and the translation into a
+``scan_dict``. Keeping it free of Streamlit is what makes that logic testable.
 """
 
 import math
@@ -23,28 +22,6 @@ import basico as bsc
 import numpy as np
 import pandas as pd
 import quicksimsbio as qsb
-
-# --- Inputs-table schema ------------------------------------------------------
-# Column names and the cell values for the Type / Scale dropdowns. Defined once
-# and shared by ``default_input_table`` and ``build_scan_dict_from_table`` so the
-# table the UI shows and the table the adapter reads can never drift apart.
-COL_PARAM = "Param"
-COL_VALUE = "Value"
-COL_LOWER = "Lower"
-COL_UPPER = "Upper"
-COL_TYPE = "Type"
-COL_SCALE = "Scale"
-COL_N = "n"
-INPUT_COLUMNS = [COL_PARAM, COL_VALUE, COL_LOWER, COL_UPPER, COL_TYPE, COL_SCALE, COL_N]
-
-TYPE_SINGLE = "Single"
-TYPE_GRID = "Grid"
-INPUT_TYPES = [TYPE_SINGLE, TYPE_GRID]
-
-SCALE_LINEAR = "Linear"
-SCALE_LOG = "Log"
-INPUT_SCALES = [SCALE_LINEAR, SCALE_LOG]
-
 
 # --- Inputs: what a model exposes ---------------------------------------------
 KIND_PARAMETER = "parameter"
@@ -137,6 +114,7 @@ def example_inputs(
 LOG_STOPS_PER_DECADE = 20  # stops per factor of ten on a log slider
 LINEAR_INTERVALS = 100  # equal steps from min to max on a linear slider
 MAX_STOPS = 1000  # cap, so an extreme log range can't build a huge slider
+LOG_MIN_FRACTION = 1e-6  # Min, as a fraction of Max, when log is switched on at 0
 
 
 def default_slider_settings(default: float) -> dict:
@@ -214,57 +192,25 @@ def nearest_option(options: list[float], value: float, log: bool) -> float:
     return min(options, key=lambda option: abs(option - value))
 
 
-# --- Inputs: time course (values → scan_dict) ---------------------------------
+# --- Inputs: scanning one input -----------------------------------------------
+# One input at a time can swap its slider for a scan: evenly spaced values across
+# the same Min / Max (log or linear, as the slider). Each value is one run, and
+# the results are shown as one panel per value.
+DEFAULT_SCAN_VALUES = 9  # a 3 x 3 grid of panels
+MAX_SCAN_VALUES = 16  # a 4 x 4 grid; beyond that the panels get too small to read
 
 
-def build_scan_dict_from_values(
-    defaults: dict[str, float], changed: dict[str, float]
-) -> dict[str, list[float]]:
-    """A single-run ``scan_dict``: changed inputs at their new value, the rest at default.
-
-    Every input becomes a one-point list — exactly what an all-``Single`` inputs
-    table produces — so the run and plot code downstream sees the shape it always
-    has. ``changed`` holds only the inputs the user chose to change; any name in
-    it that isn't a model input is ignored.
-    """
-    return {
-        name: [float(changed.get(name, default))] for name, default in defaults.items()
-    }
-
-
-# --- Inputs: general table (defaults → table → scan_dict) ---------------------
-
-
-def default_input_table(defaults: dict[str, float]) -> pd.DataFrame:
-    """Build the starting inputs table from ``{name: default_value}``.
-
-    Every input starts as ``Single`` (held at its default Value); Lower/Upper/n
-    are blank (``NaN``) and only matter once a row is switched to ``Grid``. Numeric
-    columns are float so ``st.data_editor``'s ``NumberColumn`` shows blanks for the
-    unused cells rather than choking on mixed/object dtypes.
-    """
-    rows = [
-        {
-            COL_PARAM: name,
-            COL_VALUE: value,
-            COL_LOWER: np.nan,
-            COL_UPPER: np.nan,
-            COL_TYPE: TYPE_SINGLE,
-            COL_SCALE: SCALE_LINEAR,
-            COL_N: np.nan,
-        }
-        for name, value in defaults.items()
-    ]
-    return pd.DataFrame(rows, columns=INPUT_COLUMNS)
+def scan_values(settings: dict, n: int) -> list[float]:
+    """The ``n`` values a scanned input runs at, from its (checked) slider settings."""
+    return _grid_values(settings["min"], settings["max"], n, log=settings["log"])
 
 
 def _grid_values(lower, upper, n, log: bool) -> list[float]:
-    """Build the list of grid points for a ``Grid`` row.
+    """``n`` evenly spaced points from ``lower`` to ``upper`` inclusive.
 
     Linear → ``np.linspace``; Log → ``np.geomspace`` (real, log-spaced points, to
     match how the package interprets log bounds — actual values, not exponents).
-    Raises ``ValueError`` with a user-facing message on the cases the UI must
-    guard against, so they surface as inline errors next to the table.
+    Raises ``ValueError`` with a plain message on input that can't make a grid.
     """
     if any(pd.isna(x) for x in (lower, upper, n)):
         raise ValueError("Grid needs Lower, Upper and n.")
@@ -280,57 +226,23 @@ def _grid_values(lower, upper, n, log: bool) -> list[float]:
     return np.linspace(lower, upper, n).tolist()
 
 
-def build_scan_dict_from_table(table: pd.DataFrame) -> tuple[dict, dict]:
-    """Translate the edited inputs table into a ``scan_dict`` (+ per-row errors).
+# --- Inputs: chosen values → scan_dict ----------------------------------------
 
-    Each row becomes one ``scan_dict`` entry, with meaning decided by its Type
-    (``st.data_editor`` can't disable cells per-row, so unused cells are simply
-    ignored here):
 
-    - ``Single`` → ``[value]`` (a one-point "grid" — holds/sets that input).
-    - ``Grid``   → a list from ``_grid_values`` (Linear or Log).
+def build_scan_dict_from_values(
+    defaults: dict[str, float], chosen: dict[str, list[float]]
+) -> dict[str, list[float]]:
+    """The run's ``scan_dict``: each chosen input at its values, the rest at default.
 
-    Returns ``(scan_dict, errors)`` where ``errors`` maps an input name to a
-    friendly message. The UI shows those and disables Run while any exist, so a
-    bad row never reaches the simulator.
+    ``chosen`` maps an input to the values it runs at: one value for a slider, or
+    the scan's values for the input being scanned. Every other input is held at
+    its default as a one-point list, so every entry has the same shape. Any name
+    in ``chosen`` that isn't a model input is ignored.
     """
-    scan_dict: dict[str, list[float]] = {}
-    errors: dict[str, str] = {}
-
-    for row in table.to_dict("records"):
-        name = row[COL_PARAM]
-        input_type = row[COL_TYPE]
-        try:
-            if input_type == TYPE_SINGLE:
-                value = row[COL_VALUE]
-                if pd.isna(value):
-                    raise ValueError("Single needs a Value.")
-                scan_dict[name] = [float(value)]
-            elif input_type == TYPE_GRID:
-                scan_dict[name] = _grid_values(
-                    row[COL_LOWER],
-                    row[COL_UPPER],
-                    row[COL_N],
-                    log=row[COL_SCALE] == SCALE_LOG,
-                )
-            else:
-                raise ValueError(f"Unknown type {input_type!r}.")
-        except ValueError as exc:
-            errors[name] = str(exc)
-
-    return scan_dict, errors
-
-
-def input_scales_from_table(table: pd.DataFrame) -> dict[str, str]:
-    """Map each input name to its Scale (``"Linear"`` / ``"Log"``) from the table.
-
-    The scan_dict alone can't tell plotting which axes are logarithmic — a Log grid
-    is just a plain ``geomspace`` list of real values, indistinguishable from a
-    linear one. The "this was Log" flag lives only in the table's Scale column, so
-    we lift it out here (keyed by input name) for the plot layer to apply to the
-    matching axis. Mirrors ``build_scan_dict_from_table``'s row iteration.
-    """
-    return {row[COL_PARAM]: row[COL_SCALE] for row in table.to_dict("records")}
+    return {
+        name: [float(value) for value in chosen.get(name, [default])]
+        for name, default in defaults.items()
+    }
 
 
 # --- Running ------------------------------------------------------------------

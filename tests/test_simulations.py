@@ -1,9 +1,9 @@
 """Tests for the simulation adapter (app/simulations.py).
 
 Pure-logic tests: ``quicksimsbio`` and basico are monkeypatched so they don't
-load COPASI or run a real simulation. They check the two table translations
-(``default_input_table`` and ``build_scan_dict_from_table``), the grid maths, and
-that ``run`` forwards its args and restores model state. One real-model test at
+load COPASI or run a real simulation. They check the slider and scan maths,
+building a ``scan_dict``, and that ``run`` forwards its args and restores model
+state. One real-model test at
 the end is the regression guard for the shared-model state leak.
 """
 
@@ -32,31 +32,6 @@ def stub_model_state(monkeypatch, stub_parameter_sets):
         simulations.bsc, "set_parameters", lambda **kw: restored.append(("params", kw))
     )
     return restored
-
-
-def _row(
-    param,
-    value=np.nan,
-    lower=np.nan,
-    upper=np.nan,
-    type_=simulations.TYPE_SINGLE,
-    scale=simulations.SCALE_LINEAR,
-    n=np.nan,
-):
-    """Build one inputs-table row dict with every column set."""
-    return {
-        simulations.COL_PARAM: param,
-        simulations.COL_VALUE: value,
-        simulations.COL_LOWER: lower,
-        simulations.COL_UPPER: upper,
-        simulations.COL_TYPE: type_,
-        simulations.COL_SCALE: scale,
-        simulations.COL_N: n,
-    }
-
-
-def _table(*rows) -> pd.DataFrame:
-    return pd.DataFrame(list(rows), columns=simulations.INPUT_COLUMNS)
 
 
 # --- reading a model's inputs -------------------------------------------------
@@ -263,27 +238,35 @@ def test_nearest_option_uses_a_log_distance_on_log_sliders_only():
 # --- build_scan_dict_from_values ----------------------------------------------
 def test_build_scan_dict_from_values_holds_unchanged_inputs_at_default():
     defaults = {"k": 2.0, "X": 3.0, "Y": 4.0}
-    scan_dict = simulations.build_scan_dict_from_values(defaults, {"X": 0.5})
+    scan_dict = simulations.build_scan_dict_from_values(defaults, {"X": [0.5]})
 
     assert scan_dict == {"k": [2.0], "X": [0.5], "Y": [4.0]}
 
 
+def test_build_scan_dict_from_values_carries_a_scanned_inputs_values():
+    defaults = {"k": 2.0, "X": 3.0}
+    chosen = {"k": [1.0, 10.0, 100.0], "X": [0.5]}  # k scanned, X on a slider
+    scan_dict = simulations.build_scan_dict_from_values(defaults, chosen)
+
+    assert scan_dict == {"k": [1.0, 10.0, 100.0], "X": [0.5]}
+
+
 def test_build_scan_dict_from_values_ignores_names_that_are_not_inputs():
-    scan_dict = simulations.build_scan_dict_from_values({"X": 3.0}, {"nope": 1.0})
+    scan_dict = simulations.build_scan_dict_from_values({"X": 3.0}, {"nope": [1.0]})
     assert scan_dict == {"X": [3.0]}
 
 
-# --- default_input_table ------------------------------------------------------
-def test_default_input_table_starts_every_input_as_single_at_default():
-    table = simulations.default_input_table({"X": 3.0, "k": 2.0})
+# --- scan_values --------------------------------------------------------------
+def test_scan_values_spread_evenly_across_the_slider_range():
+    log = {"min": 0.01, "max": 100.0, "log": True}
+    assert simulations.scan_values(log, 5) == pytest.approx([0.01, 0.1, 1, 10, 100])
+    linear = {"min": 0.0, "max": 1.0, "log": False}
+    assert simulations.scan_values(linear, 3) == [0.0, 0.5, 1.0]
 
-    assert list(table.columns) == simulations.INPUT_COLUMNS
-    assert list(table[simulations.COL_PARAM]) == ["X", "k"]
-    assert list(table[simulations.COL_VALUE]) == [3.0, 2.0]
-    assert set(table[simulations.COL_TYPE]) == {simulations.TYPE_SINGLE}
-    assert set(table[simulations.COL_SCALE]) == {simulations.SCALE_LINEAR}
-    assert table[simulations.COL_LOWER].isna().all()  # blank until switched to Grid
-    assert table[simulations.COL_N].isna().all()
+
+def test_the_default_scan_fills_a_square_grid_within_the_cap():
+    assert simulations.DEFAULT_SCAN_VALUES == 9  # 3 x 3 panels
+    assert simulations.DEFAULT_SCAN_VALUES <= simulations.MAX_SCAN_VALUES
 
 
 # --- _grid_values -------------------------------------------------------------
@@ -305,94 +288,6 @@ def test_grid_values_rejects_bad_inputs_with_friendly_messages():
         simulations._grid_values(0, 10, 5, log=True)
     with pytest.raises(ValueError, match="Lower, Upper and n"):
         simulations._grid_values(np.nan, 10, 5, log=False)
-
-
-# --- build_scan_dict_from_table -----------------------------------------------
-def test_build_scan_dict_single_becomes_a_one_point_list():
-    scan, errors = simulations.build_scan_dict_from_table(_table(_row("A", value=1.0)))
-
-    assert scan == {"A": [1.0]}
-    assert errors == {}
-
-
-def test_build_scan_dict_all_single_each_have_length_one():
-    table = _table(_row("A", value=1.0), _row("B", value=2.0))
-    scan, errors = simulations.build_scan_dict_from_table(table)
-
-    assert scan == {"A": [1.0], "B": [2.0]}
-    assert all(len(v) == 1 for v in scan.values())  # ⇒ one combined parameter set
-    assert errors == {}
-
-
-def test_build_scan_dict_grid_linear_and_log():
-    table = _table(
-        _row("B", lower=1, upper=4, type_=simulations.TYPE_GRID, n=4),
-        _row(
-            "C",
-            lower=0.01,
-            upper=100,
-            type_=simulations.TYPE_GRID,
-            scale=simulations.SCALE_LOG,
-            n=5,
-        ),
-    )
-    scan, errors = simulations.build_scan_dict_from_table(table)
-
-    assert errors == {}
-    assert scan["B"] == [1.0, 2.0, 3.0, 4.0]
-    assert scan["C"] == pytest.approx([0.01, 0.1, 1.0, 10.0, 100.0])
-
-
-def test_build_scan_dict_rejects_an_unknown_type():
-    # The UI can only emit Single/Grid (fixed dropdown), but the adapter still
-    # guards its `else` branch so a stray type surfaces as a friendly error.
-    scan, errors = simulations.build_scan_dict_from_table(
-        _table(_row("A", type_="Bogus"))
-    )
-
-    assert "A" not in scan
-    assert "Unknown type" in errors["A"]
-
-
-def test_build_scan_dict_single_without_a_value_errors():
-    scan, errors = simulations.build_scan_dict_from_table(
-        _table(_row("A", value=np.nan))
-    )
-
-    assert "A" not in scan
-    assert "Value" in errors["A"]
-
-
-def test_build_scan_dict_collects_errors_without_dropping_good_rows():
-    table = _table(
-        _row("good", value=1.0),
-        _row(
-            "bad", lower=10, upper=1, type_=simulations.TYPE_GRID, n=3
-        ),  # lower >= upper
-    )
-    scan, errors = simulations.build_scan_dict_from_table(table)
-
-    assert scan == {"good": [1.0]}
-    assert "less than Upper" in errors["bad"]
-
-
-# --- input_scales_from_table --------------------------------------------------
-def test_input_scales_from_table_maps_each_input_to_its_scale():
-    table = _table(
-        _row("A", value=1.0),  # Single ⇒ Linear (the default)
-        _row(
-            "B",
-            lower=0.1,
-            upper=10,
-            type_=simulations.TYPE_GRID,
-            scale=simulations.SCALE_LOG,
-            n=5,
-        ),
-    )
-    assert simulations.input_scales_from_table(table) == {
-        "A": simulations.SCALE_LINEAR,
-        "B": simulations.SCALE_LOG,
-    }
 
 
 # --- make_timepoints ----------------------------------------------------------

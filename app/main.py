@@ -324,66 +324,33 @@ def render_results(tab: str, source: dict):
         # blank every tab drawn after this one. return only ends this tab's panel.
         return
 
-    # The plot morphs to how many inputs were scanned (see plotting.mode):
-    # 0 varying -> kinetics vs time, 1 -> output vs that input, 2+ -> scatter.
-    varying = plotting.varying_inputs(last_run["scan_dict"])
-    mode = plotting.mode(last_run["scan_dict"])
+    # The plot follows what was run (see plotting.mode): nothing scanned -> one
+    # kinetics plot; one input scanned -> the same traces, one panel per value.
+    scan_dict = last_run["scan_dict"]
     try:
-        if mode in (plotting.MODE_KINETICS, plotting.MODE_VS_INPUT):
-            plot_type = st.radio(
-                "Plot type",
-                plotting.PLOT_TYPES,
-                # Only the label changes: "area" stacks its series, so say so.
-                format_func=lambda kind: "stacked area" if kind == "area" else kind,
-                horizontal=True,
-                key=f"{tab}::plot_type",
-            )
-            outputs = long[plotting.COL_OUTPUT_TYPE].unique().tolist()
-            hidden_key = f"{tab}::hidden::{last_run['kind']}::{last_run['ref']}"
-            hidden = st.session_state.setdefault(hidden_key, set())
-            shown = [output for output in outputs if output not in hidden]
-            if mode == plotting.MODE_KINETICS:
-                fig = plotting.kinetics_figure(long, plot_type=plot_type, shown=shown)
-            else:
-                fig = plotting.vs_input_figure(
-                    long,
-                    last_run["scan_dict"],
-                    last_run["scales"],
-                    plot_type=plot_type,
-                    shown=shown,
-                )
-            # Our legend (under the plot) replaces Plotly's; a little extra height
-            # now the plot has two-thirds of the width.
-            fig.update_layout(showlegend=False, height=500)
-            st.plotly_chart(fig, width="stretch", key=f"{tab}::plot")
-            render_legend(tab, hidden_key, outputs)
+        plot_type = st.radio(
+            "Plot type",
+            plotting.PLOT_TYPES,
+            # Only the label changes: "area" stacks its series, so say so.
+            format_func=lambda kind: "stacked area" if kind == "area" else kind,
+            horizontal=True,
+            key=f"{tab}::plot_type",
+        )
+        outputs = long[plotting.COL_OUTPUT_TYPE].unique().tolist()
+        hidden_key = f"{tab}::hidden::{last_run['kind']}::{last_run['ref']}"
+        hidden = st.session_state.setdefault(hidden_key, set())
+        shown = [output for output in outputs if output not in hidden]
+        if plotting.mode(scan_dict) == plotting.MODE_KINETICS:
+            fig = plotting.kinetics_figure(long, plot_type=plot_type, shown=shown)
+            fig.update_layout(height=500)  # the facet figure sets its own height
         else:
-            # 2+ scanned inputs: a scatter of one output (colour, or z+colour in
-            # 3-D) over two chosen inputs. These pickers live outside the Run
-            # block, so changing them re-renders from the cached result without
-            # re-simulating.
-            outputs = sorted(long[plotting.COL_OUTPUT_TYPE].unique())
-            col_out, col_x, col_y = st.columns(3)
-            output_type = col_out.selectbox(
-                "Output", outputs, key=f"{tab}::scatter_output"
+            fig = plotting.facet_figure(
+                long, scan_dict, plot_type=plot_type, shown=shown
             )
-            x_input = col_x.selectbox(
-                "X axis", varying, index=0, key=f"{tab}::scatter_x"
-            )
-            y_input = col_y.selectbox(
-                "Y axis", varying, index=1, key=f"{tab}::scatter_y"
-            )
-            three_d = st.toggle("3-D view", key=f"{tab}::scatter_3d")
-            fig = plotting.scatter_figure(
-                long,
-                last_run["scan_dict"],
-                last_run["scales"],
-                x_input,
-                y_input,
-                output_type,
-                three_d=three_d,
-            )
-            st.plotly_chart(fig, width="stretch", key=f"{tab}::plot")
+        # Our legend (under the plot) replaces Plotly's.
+        fig.update_layout(showlegend=False)
+        st.plotly_chart(fig, width="stretch", key=f"{tab}::plot")
+        render_legend(tab, hidden_key, outputs)
     except Exception as exc:  # broad on purpose: keep the data, explain the plot
         st.warning(
             "Couldn't draw a plot for this result — here's the raw data instead."
@@ -415,6 +382,11 @@ def _remove_input(chosen_key: str, name: str, row_keys: list[str]):
         st.session_state.pop(key, None)
 
 
+def _row_key(model_key: str, field: str, name: str) -> str:
+    """The session-state key for one setting of one input's row."""
+    return f"{model_key}::{field}::{name}"
+
+
 def _slider_settings(keys: dict, default: float) -> tuple[dict, str]:
     """This row's slider settings, checked. Returns (settings, problem message or "").
 
@@ -430,46 +402,115 @@ def _slider_settings(keys: dict, default: float) -> tuple[dict, str]:
     return simulations.check_slider_settings(settings, default)
 
 
+def _switch_to_log(min_key: str, max_key: str, log_key: str):
+    """Log-scale callback: a log scale can't start at 0 (or below), so turning it
+    on moves Min up to a millionth of Max, rather than refusing the switch."""
+    low, high = st.session_state[min_key], st.session_state[max_key]
+    if st.session_state[log_key] and low <= 0 < high:
+        st.session_state[min_key] = float(f"{high * simulations.LOG_MIN_FRACTION:.6g}")
+
+
 def render_input_row(
-    model_key: str, chosen_key: str, name: str, default: float, kind: str
-):
-    """One chosen input as a compact row: [slider] [⚙] [×]. Returns its value.
+    model_key: str,
+    chosen_key: str,
+    name: str,
+    default: float,
+    kind: str,
+    scan_locked: bool,
+) -> list[float]:
+    """One chosen input as a compact row: [slider] [⚙] [×]. Returns its values.
 
     The slider moves through real values: by default 1/100 to 100× the default on
     a log scale, or a linear 0 – 1 for an input that starts at 0 (nothing to base
     a range on, so the user widens it). ⚙ sets Min, Max and Log scale; × removes
     the row. A horizontal container (not columns) keeps the row together on a
     phone, where columns stack.
+
+    **Scanning:** ⚙ can also switch the row to a scan — several evenly spaced
+    values across the same Min / Max — which swaps the slider for a frozen bar
+    marking each value (``plotting.scan_bar_html``). Only one input scans at a
+    time, so ``scan_locked`` greys out the switch while another input is
+    scanning. Returns one value for a slider, or the scan's values.
     """
     keys = {
-        field: f"{model_key}::{field}::{name}"
-        for field in ("value", "min", "max", "log")
+        field: _row_key(model_key, field, name)
+        for field in ("value", "min", "max", "log", "scan", "n")
     }
     label = (
         f"{name} (initial concentration)" if kind == simulations.KIND_SPECIES else name
     )
+    scanning = st.session_state.get(keys["scan"], False)
 
     with st.container(horizontal=True, vertical_alignment="bottom"):
         settings, problem = _slider_settings(keys, default)
-        options = simulations.slider_options(settings, default)
-        # Keep the slider on a valid stop if its settings have just changed.
-        current = st.session_state.get(keys["value"], default)
-        st.session_state[keys["value"]] = simulations.nearest_option(
-            options, current, settings["log"]
-        )
-        value = st.select_slider(
-            label,
-            options=options,
-            format_func=lambda v: f"{v:.3g}",
-            key=keys["value"],
-            width="stretch",
-        )
+        if scanning:
+            n = st.session_state.get(keys["n"], simulations.DEFAULT_SCAN_VALUES)
+            values = simulations.scan_values(settings, n)
+            colour = st.get_option("theme.primaryColor") or "#ff4b4b"
+            with st.container(width="stretch"):
+                st.html(
+                    plotting.scan_bar_html(
+                        "qsb-scan-bar", label, values, settings["log"], colour
+                    )
+                )
+        else:
+            options = simulations.slider_options(settings, default)
+            # Keep the slider on a valid stop if its settings have just changed.
+            current = st.session_state.get(keys["value"], default)
+            st.session_state[keys["value"]] = simulations.nearest_option(
+                options, current, settings["log"]
+            )
+            value = st.select_slider(
+                label,
+                options=options,
+                format_func=lambda v: f"{v:.3g}",
+                key=keys["value"],
+                width="stretch",
+            )
+            values = [value]
 
+        # Seeded through session state, not value=, so _switch_to_log can change
+        # Min: Streamlit warns if a widget gets both a value= and a state value.
         base = simulations.default_slider_settings(default)
-        with st.popover("", icon=":material/tune:", help="Slider settings"):
-            st.number_input("Min", value=base["min"], format="%g", key=keys["min"])
-            st.number_input("Max", value=base["max"], format="%g", key=keys["max"])
-            st.toggle("Log scale", value=base["log"], key=keys["log"])
+        for field in ("min", "max", "log"):
+            st.session_state.setdefault(keys[field], base[field])
+        # Keyed so the open panel stays with *this* input when the rows reorder
+        # (a scanned input jumps to the top). Unkeyed, Streamlit tells elements
+        # apart by position, so the panel stayed open on whichever row moved in.
+        with st.popover(
+            "",
+            icon=":material/tune:",
+            help="Slider settings",
+            key=_row_key(model_key, "settings", name),
+        ):
+            st.number_input("Min", format="%g", key=keys["min"])
+            st.number_input("Max", format="%g", key=keys["max"])
+            st.toggle(
+                "Log scale",
+                key=keys["log"],
+                on_change=_switch_to_log,
+                args=(keys["min"], keys["max"], keys["log"]),
+            )
+            st.toggle(
+                "Scan across several values",
+                key=keys["scan"],
+                disabled=scan_locked,
+                help=(
+                    "Only one input can be scanned at a time."
+                    if scan_locked
+                    else "Run once for each of several evenly spaced values "
+                    "between Min and Max, and show each as its own panel."
+                ),
+            )
+            if scanning:
+                st.number_input(
+                    "Number of values",
+                    min_value=2,
+                    max_value=simulations.MAX_SCAN_VALUES,
+                    value=simulations.DEFAULT_SCAN_VALUES,
+                    step=1,
+                    key=keys["n"],
+                )
             if problem:
                 st.caption(problem)
 
@@ -481,7 +522,29 @@ def render_input_row(
             on_click=_remove_input,
             args=(chosen_key, name, list(keys.values())),
         )
-    return value
+    return values
+
+
+# The inputs column stays in view while the results column scrolls (a 4 x 4 scan
+# is far taller than the screen), and scrolls on its own if it has many rows.
+# CSS "position: sticky" pins it below Streamlit's header bar
+# (https://developer.mozilla.org/en-US/docs/Web/CSS/position#sticky).
+# The column is found through the keyed container inside it (the documented
+# st-key-<key> class) and Streamlit's data-testid="stColumn", which isn't a
+# documented API: if an upgrade renames it, the column simply stops sticking.
+# Only on wide screens: below 640 px Streamlit stacks the columns anyway.
+INPUTS_COLUMN_CSS = """
+@media (min-width: 640px) {
+  [data-testid="stColumn"]:has(.st-key-time-course-inputs) {
+    position: sticky;
+    top: 4rem;
+    align-self: flex-start;
+    max-height: calc(100vh - 5rem);
+    overflow-y: auto;
+    padding-right: 0.5rem;
+  }
+}
+"""
 
 
 def render_time_course_mode(tab: str, source: dict):
@@ -509,12 +572,13 @@ def render_time_course_mode(tab: str, source: dict):
     # below needs the times; a column's place on screen is fixed when st.columns()
     # creates it, not by the order it's filled in.
     col_inputs, col_outputs = st.columns([1, 2], gap="large")
+    st.html(f"<style>{INPUTS_COLUMN_CSS}</style>")
 
     with col_outputs:
         start, end, n_points, time_error = render_time_window(tab)
         render_events_panel(tab, source, end)
 
-    with col_inputs:
+    with col_inputs, st.container(key="time-course-inputs"):
         st.selectbox(
             "Add an input",
             options=[name for name in defaults if name not in chosen],
@@ -533,13 +597,29 @@ def render_time_course_mode(tab: str, source: dict):
             on_change=_add_input,
             args=(chosen_key, picker_key),
         )
-        changed = {
+        # The input being scanned (at most one) gets the top row, so the panels'
+        # variable sits first; every other input keeps its slider below it.
+        scanned = next(
+            (
+                name
+                for name in chosen
+                if st.session_state.get(_row_key(model_key, "scan", name))
+            ),
+            None,
+        )
+        rows = ([scanned] if scanned else []) + [n for n in chosen if n != scanned]
+        chosen_values = {
             name: render_input_row(
-                model_key, chosen_key, name, defaults[name], kinds[name]
+                model_key,
+                chosen_key,
+                name,
+                defaults[name],
+                kinds[name],
+                scan_locked=scanned is not None and name != scanned,
             )
-            for name in chosen
+            for name in rows
         }
-        scan_dict = simulations.build_scan_dict_from_values(defaults, changed)
+        scan_dict = simulations.build_scan_dict_from_values(defaults, chosen_values)
 
         if not time_error:
             st.session_state[f"last_run::{tab}"] = {
@@ -547,7 +627,6 @@ def render_time_course_mode(tab: str, source: dict):
                 "ref": source["ref"],
                 "scan_dict": scan_dict,
                 "timepoints": simulations.make_timepoints(start, end, int(n_points)),
-                "scales": {},  # a time course scans nothing, so no axis is logged
             }
 
     with col_outputs:
@@ -614,9 +693,6 @@ if choice == models.DEFAULT_MODEL:
 st.caption(model_line)
 
 # --- Time course --------------------------------------------------------------
-# One view, no tabs (7 Oct): the "Vary multiple inputs" tab was removed so a
-# visitor meets one clear experience. Scanning will return as a mode *within*
-# Time course — see "★ The final version" in docs/TODO.md. The scan backend
-# (simulations.build_scan_dict_from_table, plotting's vs-input and scatter
-# figures, and render_results' scan branches) is kept for that.
+# One view, no tabs: a visitor meets one clear experience. Scanning one input
+# is a setting on that input's row (⚙), not a separate mode.
 render_time_course_mode("time_course", source)

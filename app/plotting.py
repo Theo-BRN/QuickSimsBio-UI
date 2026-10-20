@@ -1,13 +1,10 @@
 """Adaptive plotting for QuickSimsBio-UI.
 
-Turns a simulation's **long** result frame into the Plotly figure that best fits
-the simulation the user ran — the view "morphs" to the number of *varying* input
-dimensions (see CLAUDE.md > the adaptive-output principle):
+Turns a simulation's **long** result frame into a Plotly figure. Which figure
+depends on what the user ran (see ``mode``):
 
-    0 varying inputs  -> kinetics traces (every output species vs time)
-    1 varying input   -> output vs that input (reduced to the final timepoint)
-    2+ varying inputs -> coloured scatter / 3-D (inputs on the axes, output as
-                         colour / z)
+    nothing scanned  -> kinetics traces (every output vs time)
+    one input scanned -> the same traces, one small panel per scanned value
 
 Like ``simulations`` and ``models``, this module is deliberately **Streamlit-free**:
 every function here is a pure transform (result frame -> figure, or frame -> facts
@@ -15,6 +12,8 @@ about the frame) so it can be unit-tested without a running app. ``main.py`` rea
 the widget selections and calls one builder.
 """
 
+import html
+import math
 import re
 
 import numpy as np
@@ -29,19 +28,13 @@ COL_OUTPUT_TYPE = "Model_Output_Type"  # which output/species, e.g. "[X]"
 COL_OUTPUT = "Model_Output"  # the numeric value
 RESERVED = {COL_TIME, COL_OUTPUT_TYPE, COL_OUTPUT}
 
-# The three ways to draw a kinetics / vs-input plot (a UI toggle picks one).
+# The three ways to draw the traces (a UI toggle picks one).
 PLOT_TYPES = ["line", "scatter", "area"]
 
-# The Scale label (from the inputs table) that means a logarithmic axis. Kept as a
-# literal here — rather than importing ``simulations.SCALE_LOG`` — so this module
-# stays free of the heavy simulations/basico import. Must match that constant.
-SCALE_LOG = "Log"
-
-# The three simulation "modes", chosen by how many inputs were scanned. Each maps
+# The two simulation "modes", chosen by how many inputs were scanned. Each maps
 # to one figure builder (see ``mode`` and the builders below).
-MODE_KINETICS = "kinetics"  # 0 varying -> kinetics_figure
-MODE_VS_INPUT = "vs_input"  # 1 varying -> vs_input_figure
-MODE_SCATTER = "scatter"  # 2+ varying -> scatter_figure
+MODE_KINETICS = "kinetics"  # nothing scanned -> kinetics_figure
+MODE_FACETS = "facets"  # one input scanned -> facet_figure
 
 # Palette + symbols carried over from the design doc
 # (Detecting results shape from input shape.md). A fixed, high-contrast order so a
@@ -82,9 +75,8 @@ CUSTOM_SYMBOLS = [
 def varying_inputs(scan_dict: dict) -> list[str]:
     """Input names that actually scan — their value list has length > 1.
 
-    The *count* is the simulation "mode": 0 -> kinetics, 1 -> output-vs-input,
-    >= 2 -> scatter. Single inputs are length-1 lists (held at a value) and so are
-    excluded. Order follows the scan_dict (i.e. the inputs-table order).
+    Inputs held at one value are length-1 lists, and so are excluded. Order
+    follows the scan_dict.
     """
     return [name for name, values in scan_dict.items() if len(values) > 1]
 
@@ -92,16 +84,16 @@ def varying_inputs(scan_dict: dict) -> list[str]:
 def mode(scan_dict: dict) -> str:
     """Pick the plot mode for a run from how many inputs were scanned.
 
-    The single source of truth for figure-builder selection: 0 varying inputs ->
-    ``MODE_KINETICS``, 1 -> ``MODE_VS_INPUT``, 2+ -> ``MODE_SCATTER``. The UI branches
-    on this to choose both the controls and the builder to call.
+    The single source of truth for figure-builder selection: nothing scanned ->
+    ``MODE_KINETICS``, one input -> ``MODE_FACETS``. The app only ever scans one
+    input at a time, by design, so more than one is a bug and raises.
     """
     n = len(varying_inputs(scan_dict))
     if n == 0:
         return MODE_KINETICS
     if n == 1:
-        return MODE_VS_INPUT
-    return MODE_SCATTER
+        return MODE_FACETS
+    raise ValueError(f"Only one input can be scanned at a time, got {n}.")
 
 
 def axis_columns(long_df) -> list[str]:
@@ -118,18 +110,6 @@ def axis_columns(long_df) -> list[str]:
         for col in long_df.columns
         if col not in RESERVED and long_df[col].nunique() > 1
     ]
-
-
-def reduce_final_timepoint(long_df):
-    """Slice a long frame to its final timepoint.
-
-    For 1-D / 2-D / n-D plots the quantity of interest is one scalar per parameter
-    set (not the whole trace), so we take each series' value at the last simulated
-    time — one ``Model_Output`` per (varying-input combo x ``Model_Output_Type``).
-    (AUC and an arbitrary-timepoint picker are deferred — see TODO M4.)
-    """
-    last = long_df[COL_TIME].max()
-    return long_df[long_df[COL_TIME] == last]
 
 
 def _column_names_input(col: str, name: str) -> bool:
@@ -153,8 +133,7 @@ def column_for_input(long_df, scan_dict: dict, name: str) -> str:
     values (compared with a float tolerance).
 
     Value-match alone is ambiguous when two inputs are scanned over the *same* range:
-    their value-sets are identical, so both would grab the same column and collapse x
-    and y onto one axis. So among the value-matches we prefer the column actually
+    their value-sets are identical, so both would grab the same column. So among the value-matches we prefer the column actually
     **named** after this input (``_column_names_input``); only if none is named do we
     fall back to the raw value-matches (keeps working for oddly-named columns).
 
@@ -256,12 +235,17 @@ def legend_entry_css(css_class: str, colour: str, shown: bool) -> str:
 
 
 def _series_figure(
-    df, x: str, plot_type: str, *, log_x: bool = False, shown: list[str] | None = None
+    df,
+    x: str,
+    plot_type: str,
+    *,
+    shown: list[str] | None = None,
+    facets: dict | None = None,
 ):
     """Shared line/scatter/area builder: ``Model_Output`` vs ``x``, per species.
 
-    Backs both the 0-D kinetics plot (``x = Time``) and the 1-D vs-input plot
-    (``x`` = the scanned input's column). Colour = ``Model_Output_Type`` so each
+    Backs both the kinetics plot and the faceted scan plot (``facets`` holds the
+    extra Plotly Express facet arguments). Colour = ``Model_Output_Type`` so each
     species is one series. ``shown`` limits which species are drawn (``None`` =
     all); colours come from ``colour_map`` over *all* species, so hiding one never
     recolours the rest.
@@ -283,16 +267,19 @@ def _series_figure(
         outputs = [output for output in outputs if output in shown]
 
     order = list(reversed(outputs)) if plot_type == "area" else outputs
+    facets = dict(facets or {})
+    # The panels' order (if any) joins the outputs' order in one category_orders.
+    category_orders = {COL_OUTPUT_TYPE: order, **facets.pop("category_orders", {})}
     return drawers[plot_type](
         df,
         x=x,
         y=COL_OUTPUT,
         color=COL_OUTPUT_TYPE,
         color_discrete_map=colours,
-        category_orders={COL_OUTPUT_TYPE: order},
+        category_orders=category_orders,
         labels=labels,
         template="plotly_white",
-        log_x=log_x,
+        **facets,
     )
 
 
@@ -301,60 +288,88 @@ def kinetics_figure(long_df, plot_type: str = "line", shown: list[str] | None = 
     return _series_figure(long_df, COL_TIME, plot_type, shown=shown)
 
 
-def vs_input_figure(
-    long_df,
-    scan_dict: dict,
-    scales: dict,
-    plot_type: str = "line",
-    shown: list[str] | None = None,
-):
-    """1-D: an output summary vs the single scanned input.
+def facet_columns(n_panels: int) -> int:
+    """Panels per row: as close to a square grid as possible (9 -> 3 x 3)."""
+    return math.ceil(math.sqrt(n_panels))
 
-    Reduces each trace to its final timepoint (one value per input value x
-    species), then plots ``Model_Output`` (y) against the scanned input's column
-    (x), coloured by species. The x-axis is logarithmic when that input's Scale is
-    ``Log`` (``scales`` maps input name -> ``"Linear"``/``"Log"``, from the table).
+
+def facet_figure(
+    long_df, scan_dict: dict, plot_type: str = "line", shown: list[str] | None = None
+):
+    """One input scanned: the kinetics traces again, one small panel per value.
+
+    Panels wrap onto rows of ``facet_columns`` and share both axes, so they
+    compare at a glance; colours follow ``colour_map``, so they match the legend.
+    Each panel is titled with its value, e.g. ``X = 0.316``. The titles are built
+    from Plotly's own ("[X]_0=0.316228"), so two values that look alike at 3
+    significant figures still get panels of their own.
     """
     name = varying_inputs(scan_dict)[0]
-    xcol = column_for_input(long_df, scan_dict, name)
-    reduced = reduce_final_timepoint(long_df)
-    return _series_figure(
-        reduced, xcol, plot_type, log_x=scales.get(name) == SCALE_LOG, shown=shown
+    column = column_for_input(long_df, scan_dict, name)
+    values = sorted(long_df[column].unique())
+    n_columns = facet_columns(len(values))
+    n_rows = math.ceil(len(values) / n_columns)
+
+    fig = _series_figure(
+        long_df,
+        COL_TIME,
+        plot_type,
+        shown=shown,
+        facets=dict(
+            facet_col=column,
+            facet_col_wrap=n_columns,
+            facet_col_spacing=0.04,
+            facet_row_spacing=0.08 if n_rows > 1 else 0,
+            category_orders={column: values},
+        ),
     )
+    fig.for_each_annotation(
+        lambda a: a.update(text=f"{name} = {float(a.text.rsplit('=', 1)[-1]):.3g}")
+    )
+    fig.update_layout(height=120 + 230 * n_rows)
+    return fig
 
 
-def scatter_figure(
-    long_df,
-    scan_dict: dict,
-    scales: dict,
-    x_input: str,
-    y_input: str,
-    output_type: str,
-    *,
-    three_d: bool = False,
-):
-    """2-D / n-D: one output across two scanned inputs.
+def scan_bar_html(
+    css_class: str, label: str, values: list[float], log: bool, colour: str
+) -> str:
+    """A frozen "slider" showing where a scan's values sit, as HTML.
 
-    Reduces to the final timepoint and filters to a single output species
-    (``output_type`` — a scatter needs one value per point, not all species at once).
-    The two chosen inputs go on the x/y axes (their columns found by value-match);
-    the output value shows as **colour** (2-D ``px.scatter``) or as a **z-axis +
-    colour** (``px.scatter_3d`` when ``three_d``). Each axis is logarithmic where its
-    input's Scale is ``Log``. Any *further* varying inputs (n-D) aren't axis-mapped —
-    their variation simply spreads the points (matches the doc's n-D note).
+    Drawn in place of the slider of the input being scanned: the same coloured
+    track, with a square marker at each value (squares, so they don't read as a
+    slider's round handle), and the range's ends written underneath, as a slider
+    does. Markers are placed on a log scale when the scan is log-spaced. It's a
+    picture, not a widget: the scan is set in the row's ⚙ settings.
     """
-    one_output = reduce_final_timepoint(long_df)
-    one_output = one_output[one_output[COL_OUTPUT_TYPE] == output_type]
+    low, high = values[0], values[-1]
 
-    common = dict(
-        x=column_for_input(long_df, scan_dict, x_input),
-        y=column_for_input(long_df, scan_dict, y_input),
-        color=COL_OUTPUT,
-        labels=value_labels([output_type]),
-        template="plotly_white",
-        log_x=scales.get(x_input) == SCALE_LOG,
-        log_y=scales.get(y_input) == SCALE_LOG,
+    def position(value: float) -> float:
+        if log:
+            return (math.log10(value) - math.log10(low)) / (
+                math.log10(high) - math.log10(low)
+            )
+        return (value - low) / (high - low)
+
+    markers = "".join(
+        f'<span class="mark" style="left:{100 * position(v):.2f}%"></span>'
+        for v in values
     )
-    if three_d:
-        return px.scatter_3d(one_output, z=COL_OUTPUT, **common)
-    return px.scatter(one_output, **common)
+    spacing = "log-spaced" if log else "evenly spaced"
+    return f"""
+<style>
+.{css_class} {{ padding: 0 0.5rem 0.25rem; font-size: 14px; }}
+.{css_class} .track {{ position: relative; height: 4px; margin: 0.9rem 0 0.6rem;
+  border-radius: 2px; background: {colour}; }}
+.{css_class} .mark {{ position: absolute; top: 50%; width: 10px; height: 10px;
+  transform: translate(-50%, -50%); background: {colour};
+  border: 1.5px solid white; border-radius: 1px; }}
+.{css_class} .ends {{ display: flex; justify-content: space-between;
+  font-size: 12px; opacity: 0.7; }}
+</style>
+<div class="{css_class}">
+  <div>{html.escape(label)}</div>
+  <div class="track">{markers}</div>
+  <div class="ends"><span>{low:.3g}</span>
+    <span>{len(values)} values · {spacing}</span><span>{high:.3g}</span></div>
+</div>
+"""

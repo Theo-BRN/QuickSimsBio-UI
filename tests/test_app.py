@@ -217,6 +217,21 @@ def test_time_course_gives_a_zero_default_a_linear_zero_to_one_slider():
     assert (ligand.options[0], ligand.options[-1]) == ("0", "1")
 
 
+def test_switching_a_zero_min_slider_to_log_moves_min_up_instead_of_refusing():
+    # A log scale can't start at 0, so switching it on moves Min to a millionth
+    # of Max, rather than flipping the toggle but quietly staying linear.
+    at = AppTest.from_file(APP_SCRIPT)
+    at.session_state["selected_model"] = "Cubic Ternary Complex Activation"
+    at.run()
+
+    _keyed(at.toggle, "::log::L").set_value(True).run()  # L: Min 0, Max 1
+    assert not at.exception
+    assert _keyed(at.number_input, "::min::L").value == 1e-6
+    ligand = _slider(at, _species("L"))
+    assert (ligand.options[0], ligand.options[-1]) == ("1e-06", "1")  # now log
+    assert not any("log scale needs" in c.value.lower() for c in at.caption)
+
+
 def test_app_describes_a_chosen_model_without_the_default_model_pointer():
     at = AppTest.from_file(APP_SCRIPT)
     at.session_state["selected_model"] = "brusselator"
@@ -394,3 +409,63 @@ def test_app_shows_no_events_section_for_a_model_without_events():
     assert not at.exception
     assert _events_status(at) == []
     assert not any(e.label == "Events in this model" for e in at.expander)
+
+
+# --- scanning one input ---------------------------------------------------------
+def _scan_toggles(at):
+    """Each row's "Scan across several values" switch, in the order drawn."""
+    return [t for t in at.toggle if t.key and "::scan::" in t.key]
+
+
+def _panel_count(at) -> int:
+    """How many facet panels the plot has (each has a title annotation)."""
+    return len(_plot_spec(at)["layout"].get("annotations", []))
+
+
+def test_scanning_an_input_runs_its_values_and_shows_a_panel_for_each():
+    at = _brusselator()
+    _keyed(at.toggle, "::scan::A").set_value(True).run()
+    assert not at.exception
+
+    request = at.session_state["last_run::time_course"]["scan_dict"]
+    assert len(request["A"]) == simulations.DEFAULT_SCAN_VALUES  # 9 values
+    assert len(request["X"]) == 1  # the other inputs stay single values
+    assert _panel_count(at) == simulations.DEFAULT_SCAN_VALUES
+    # A's slider is swapped for the frozen scan bar; the others keep theirs.
+    assert _species("A") not in [s.label for s in at.select_slider]
+    assert _slider(at, _species("X"))
+
+
+def test_the_scanned_input_moves_to_the_top_and_locks_the_others():
+    at = _brusselator()  # rows start X, Y, A
+    _keyed(at.toggle, "::scan::A").set_value(True).run()
+
+    toggles = _scan_toggles(at)
+    assert toggles[0].key.endswith("::scan::A")  # A's row is now drawn first
+    assert not toggles[0].disabled
+    assert all(t.disabled for t in toggles[1:])  # one scan at a time
+
+
+def test_the_number_of_scan_values_can_change_up_to_the_cap():
+    at = _brusselator()
+    _keyed(at.toggle, "::scan::A").set_value(True).run()
+
+    n_box = _keyed(at.number_input, "::n::A")
+    assert n_box.value == simulations.DEFAULT_SCAN_VALUES
+    assert n_box.max == simulations.MAX_SCAN_VALUES
+    n_box.set_value(4).run()
+    assert not at.exception
+    assert len(at.session_state["last_run::time_course"]["scan_dict"]["A"]) == 4
+    assert _panel_count(at) == 4
+
+
+def test_turning_a_scan_off_brings_back_its_slider_and_a_single_run():
+    at = _brusselator()
+    _keyed(at.toggle, "::scan::A").set_value(True).run()
+    _keyed(at.toggle, "::scan::A").set_value(False).run()
+    assert not at.exception
+
+    assert _slider(at, _species("A"))
+    assert len(at.session_state["last_run::time_course"]["scan_dict"]["A"]) == 1
+    assert _panel_count(at) == 0  # one plain plot again
+    assert not any(t.disabled for t in _scan_toggles(at))

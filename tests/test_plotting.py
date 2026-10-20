@@ -6,6 +6,8 @@ element) and assert on the facts they extract and the Plotly figures they build 
 structure (trace count, axis data/types), not pixels.
 """
 
+import re
+
 import pandas as pd
 import plotly.graph_objects as go
 import plotting
@@ -51,15 +53,15 @@ def test_varying_inputs_empty_when_all_single():
 
 
 # --- mode (mode -> figure-builder selection) ----------------------------------
-def test_mode_maps_varying_count_to_the_right_plot():
-    assert plotting.mode({"A": [1.0], "B": [2.0]}) == plotting.MODE_KINETICS  # 0
-    assert plotting.mode({"A": [1.0], "B": [1.0, 2.0]}) == plotting.MODE_VS_INPUT  # 1
-    assert (
-        plotting.mode({"A": [1.0, 2.0], "B": [1.0, 2.0]}) == plotting.MODE_SCATTER
-    )  # 2
-    assert (
-        plotting.mode({"A": [1, 2], "B": [1, 2], "C": [1, 2]}) == plotting.MODE_SCATTER
-    )  # 3+
+def test_mode_is_kinetics_with_nothing_scanned_and_facets_with_one_input():
+    assert plotting.mode({"A": [1.0], "B": [2.0]}) == plotting.MODE_KINETICS
+    assert plotting.mode({"A": [1.0], "B": [1.0, 2.0]}) == plotting.MODE_FACETS
+
+
+def test_mode_refuses_two_scanned_inputs():
+    # Only one input is scanned at a time, by design; two would be a bug.
+    with pytest.raises(ValueError, match="one input"):
+        plotting.mode({"A": [1.0, 2.0], "B": [1.0, 2.0]})
 
 
 # --- axis_columns -------------------------------------------------------------
@@ -67,14 +69,6 @@ def test_axis_columns_keeps_only_non_reserved_that_actually_vary():
     long = _scan_long()
     # [X]_0 varies; [Y]_0 is constant; Time/Model_Output_Type/Model_Output reserved.
     assert plotting.axis_columns(long) == ["[X]_0"]
-
-
-# --- reduce_final_timepoint ---------------------------------------------------
-def test_reduce_final_timepoint_keeps_only_the_last_time():
-    reduced = plotting.reduce_final_timepoint(_scan_long())
-
-    assert set(reduced["Time"]) == {1.0}  # only the max time survives
-    assert len(reduced) == 3  # one row per X value
 
 
 # --- column_for_input ---------------------------------------------------------
@@ -249,84 +243,94 @@ def test_a_species_has_the_same_colour_in_line_and_area_plots():
     )
 
 
-# --- vs_input_figure ----------------------------------------------------------
-def test_vs_input_figure_plots_output_against_the_scanned_column():
-    long = _scan_long()  # species '[Z]' over a 3-point scan of X (column '[X]_0')
-    scan = {"X": [0.1, 1.0, 10.0], "Y": [5.0]}  # X varies, Y held
-    fig = plotting.vs_input_figure(long, scan, {"X": "Linear", "Y": "Linear"})
-
-    assert isinstance(fig, go.Figure)
-    assert len(fig.data) == 1  # one species
-    assert list(fig.data[0].x) == [0.1, 1.0, 10.0]  # x = the scanned input column
-    assert fig.layout.xaxis.type != "log"  # linear unless Scale is Log
-
-
-def test_vs_input_figure_uses_log_x_when_scale_is_log():
-    long = _scan_long()
-    scan = {"X": [0.1, 1.0, 10.0], "Y": [5.0]}
-    fig = plotting.vs_input_figure(long, scan, {"X": "Log", "Y": "Linear"})
-
-    assert fig.layout.xaxis.type == "log"  # Log scale ⇒ log x-axis
-
-
-# --- scatter_figure -----------------------------------------------------------
-def _scan2d_long(species=("[Z]",)) -> pd.DataFrame:
-    """A 2-D long frame: two scanned inputs (X, Y), sampled over time per species."""
+# --- facet_figure -------------------------------------------------------------
+def _facet_long(x_values, species=("[Z]", "[W]")) -> pd.DataFrame:
+    """A scan of input X (column ``[X]_0``): every species over time, per X value."""
     rows = [
         {
             "[X]_0": x,
-            "[Y]_0": y,
             "Time": t,
             "Model_Output_Type": sp,
-            "Model_Output": x * y + t,
+            "Model_Output": x * len(sp) + t,
         }
-        for x in (0.1, 1.0, 10.0)
-        for y in (2.0, 4.0)
-        for t in (0.0, 1.0)
+        for x in x_values
+        for t in (0.0, 1.0, 2.0)
         for sp in species
     ]
     return pd.DataFrame(rows)
 
 
-def test_scatter_figure_2d_is_a_flat_scatter_with_a_point_per_combo():
-    scan = {"X": [0.1, 1.0, 10.0], "Y": [2.0, 4.0]}
-    fig = plotting.scatter_figure(
-        _scan2d_long(), scan, {"X": "Linear", "Y": "Linear"}, "X", "Y", "[Z]"
-    )
-    assert isinstance(fig, go.Figure)
-    assert fig.data[0].type == "scatter"  # 2-D (no z)
-    assert len(fig.data[0].x) == 6  # 3 X values × 2 Y values
+@pytest.mark.parametrize("n, columns", [(1, 1), (2, 2), (4, 2), (5, 3), (9, 3), (16, 4)])
+def test_facet_columns_make_the_squarest_grid(n, columns):
+    assert plotting.facet_columns(n) == columns
 
 
-def test_scatter_figure_3d_adds_a_z_axis():
-    scan = {"X": [0.1, 1.0, 10.0], "Y": [2.0, 4.0]}
-    fig = plotting.scatter_figure(
-        _scan2d_long(),
-        scan,
-        {"X": "Linear", "Y": "Linear"},
-        "X",
-        "Y",
-        "[Z]",
-        three_d=True,
-    )
-    assert fig.data[0].type == "scatter3d"
-    assert fig.data[0].z is not None  # output on the z-axis too
+def test_facet_figure_draws_one_panel_per_scanned_value():
+    x_values = [0.01, 0.1, 1.0, 10.0, 100.0]
+    fig = plotting.facet_figure(_facet_long(x_values), {"X": x_values, "Y": [5.0]})
+
+    # In reading order (top row first, left to right), not Plotly's list order.
+    on_screen = sorted(fig.layout.annotations, key=lambda a: (-a.y, a.x))
+    titles = [a.text for a in on_screen]
+    assert titles == ["X = 0.01", "X = 0.1", "X = 1", "X = 10", "X = 100"]
+    assert len(fig.data) == 5 * 2  # one trace per species, per panel
+    assert all(list(trace.x) == [0.0, 1.0, 2.0] for trace in fig.data)  # vs time
 
 
-def test_scatter_figure_logs_each_axis_per_input_scale():
-    scan = {"X": [0.1, 1.0, 10.0], "Y": [2.0, 4.0]}
-    fig = plotting.scatter_figure(
-        _scan2d_long(), scan, {"X": "Log", "Y": "Linear"}, "X", "Y", "[Z]"
-    )
-    assert fig.layout.xaxis.type == "log"  # X is Log
-    assert fig.layout.yaxis.type != "log"  # Y stays linear
+def test_facet_figure_panels_share_their_axes():
+    x_values = [1.0, 2.0, 3.0, 4.0]
+    fig = plotting.facet_figure(_facet_long(x_values), {"X": x_values})
+    # Plotly Express shares axes by tying every panel's axis to the first one.
+    y_axes = [fig.layout[k] for k in fig.layout if k.startswith("yaxis")]
+    assert all(axis.matches in (None, "y") for axis in y_axes)
+    assert sum(axis.matches == "y" for axis in y_axes) == len(y_axes) - 1
 
 
-def test_scatter_figure_filters_to_the_chosen_output():
-    # Two species present; choosing '[Z]' must not also plot '[W]' points.
-    long = _scan2d_long(species=("[Z]", "[W]"))
-    scan = {"X": [0.1, 1.0, 10.0], "Y": [2.0, 4.0]}
-    fig = plotting.scatter_figure(
-        long, scan, {"X": "Linear", "Y": "Linear"}, "X", "Y", "[Z]"
-    )
-    assert len(fig.data[0].x) == 6  # one species' 6 combos, not 12
+def test_facet_figure_keeps_each_species_one_colour_across_panels():
+    x_values = [1.0, 2.0, 3.0]
+    fig = plotting.facet_figure(_facet_long(x_values), {"X": x_values})
+    colours = plotting.colour_map(["[Z]", "[W]"])
+    assert all(trace.line.color == colours[trace.name] for trace in fig.data)
+
+
+def test_facet_figure_draws_only_the_shown_species():
+    x_values = [1.0, 2.0]
+    fig = plotting.facet_figure(_facet_long(x_values), {"X": x_values}, shown=["[W]"])
+    assert {trace.name for trace in fig.data} == {"[W]"}
+
+
+def test_facet_figure_grows_taller_with_more_rows():
+    def height(n):
+        x_values = [float(v) for v in range(1, n + 1)]
+        return plotting.facet_figure(_facet_long(x_values), {"X": x_values}).layout.height
+
+    assert height(3) < height(9) < height(16)  # 1, 3 and 4 rows
+
+
+def test_facet_titles_tell_apart_values_that_look_alike_rounded():
+    # Two values the same at 3 significant figures still get a panel each.
+    x_values = [1.0001, 1.0002]
+    fig = plotting.facet_figure(_facet_long(x_values), {"X": x_values})
+    assert len(fig.layout.annotations) == 2
+
+
+# --- scan_bar_html ------------------------------------------------------------
+def _marker_positions(markup: str) -> list[float]:
+    return [float(p) for p in re.findall(r"left:([\d.]+)%", markup)]
+
+
+def test_scan_bar_places_a_marker_at_each_value_from_end_to_end():
+    markup = plotting.scan_bar_html("bar", "k", [0.0, 0.5, 1.0], False, "#ff4b4b")
+    assert _marker_positions(markup) == [0.0, 50.0, 100.0]
+    assert "3 values · evenly spaced" in markup
+
+
+def test_scan_bar_spaces_log_scans_evenly_by_factor_of_ten():
+    markup = plotting.scan_bar_html("bar", "k", [0.01, 1.0, 100.0], True, "#ff4b4b")
+    assert _marker_positions(markup) == [0.0, 50.0, 100.0]
+    assert ">0.01<" in markup and ">100<" in markup  # the ends, as on a slider
+
+
+def test_scan_bar_escapes_the_label():
+    markup = plotting.scan_bar_html("bar", "<b>k</b>", [1.0, 2.0], False, "#ff4b4b")
+    assert "<b>k</b>" not in markup and "&lt;b&gt;k&lt;/b&gt;" in markup
