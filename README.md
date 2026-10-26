@@ -2,6 +2,7 @@
 
 **Run mechanistic (systems-biology) model simulations from your browser — no code required.**
 
+[![DOI](https://zenodo.org/badge/1273362303.svg)](https://doi.org/10.5281/zenodo.23667904)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 ![Python](https://img.shields.io/badge/python-3.12%2B-blue.svg)
 ![Built with Streamlit](https://img.shields.io/badge/built%20with-Streamlit-FF4B4B.svg?logo=streamlit&logoColor=white)

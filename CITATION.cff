@@ -28,6 +28,7 @@ authors:
     affiliation: "Department of Molecular and Clinical Cancer Medicine, University of Liverpool"
 version: 1.0.0
 date-released: 2026-10-26
+doi: 10.5281/zenodo.23667904
 license: MIT
 repository-code: "https://github.com/Theo-BRN/QuickSimsBio-UI"
 url: "https://github.com/Theo-BRN/QuickSimsBio-UI"
