@@ -1918,8 +1918,8 @@ scipy = ">=1.17.1,<2.0.0"
 [package.source]
 type = "git"
 url = "https://github.com/Theo-BRN/QuickSimsBio.git"
-reference = "main"
-resolved_reference = "bf33f3e4691941c4b27a137d029f9c2649dc432c"
+reference = "v0.1.0"
+resolved_reference = "c0b86aa96a8a7baebebce24023853f1b5614858f"
 
 [[package]]
 name = "referencing"
@@ -2530,4 +2530,4 @@ files = [
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.12"
-content-hash = "afd4c90b603d0b8b7d0fc46b4b865c3f9ffc13bd8d636c2048c9e05fe35279a6"
+content-hash = "8d498a02cadaf341003e0e45808d5cc24db7d280e3254a9d06296add4801697b"

@@ -10,7 +10,7 @@ dependencies = [
     "streamlit (>=1.58.0,<2.0.0)",
     "copasi-basico (>=0.86,<0.87)",
     "plotly (>=6.8.0,<7.0.0)",
-    "quicksimsbio @ git+https://github.com/Theo-BRN/QuickSimsBio.git@main",
+    "quicksimsbio @ git+https://github.com/Theo-BRN/QuickSimsBio.git@v0.1.0",
 ]
 
 
